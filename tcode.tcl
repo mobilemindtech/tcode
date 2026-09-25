@@ -81,7 +81,7 @@ namespace eval qc {
     variable cfg
     array set cfg {
         fontsize 12 wrap 0 autoclear 1 recent {} geometry 1100x800
-        lastdir "" sash 0.65 lang ""
+        lastdir "" lang ""
     }
     # Paleta escura (inspirada no Darcula)
     variable C
@@ -255,8 +255,6 @@ proc qc::saveCfg {} {
     variable cfg
     catch {
         set cfg(geometry) [wm geometry .]
-        set h [winfo height .pw]
-        if {$h > 50} { set cfg(sash) [format %.3f [expr {double([.pw sashpos 0]) / $h}]] }
     }
     set out ""
     foreach k [lsort [array names cfg]] { append out [list $k $cfg($k)] \n }
@@ -441,12 +439,14 @@ proc qc::buildUI {} {
     bind $ed <<Modified>> qc::updateTitle
     wm protocol . WM_DELETE_WINDOW qc::quit
 
-    # posição inicial do divisor
-    after idle {
-        update idletasks
-        set h [winfo height .pw]
-        if {$h > 50} { catch {.pw sashpos 0 [expr {int($h * $::qc::cfg(sash))}]} }
-    }
+    # divisor em 70% editor / 30% console até o usuário arrastá-lo
+    bind .pw <Configure> qc::initSash
+    bind .pw <ButtonPress-1> {+bind .pw <Configure> {}}
+}
+
+proc qc::initSash {} {
+    set h [winfo height .pw]
+    if {$h > 50} { catch {.pw sashpos 0 [expr {int($h * 0.70)}]} }
 }
 
 proc qc::buildMenus {} {
@@ -2198,6 +2198,7 @@ qc::language tcl {
     dedentChars "\}"
     tokens {
         comment {(?:^|;)[ \t]*(#[^\n]*)}
+        escape  {\\.}
         string  {"(?:[^"\\]|\\.)*"?}
         var     {\$(?:\{[^\}\n]*\}|(?:::)?[A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)*(?:\([^)\n]*\))?)}
         number  {\m(?:0[xX][0-9a-fA-F]+|[0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)\M}
