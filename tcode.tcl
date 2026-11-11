@@ -42,6 +42,7 @@
 # Nos args do runner: %F arquivo, %W wrapper (chave "wrapper" do runner),
 # %O opções do usuário, %A argumentos do programa, %--A "-- args" se houver.
 # Outras chaves: capType, numberWord, sub, styles, commentRe, dedentChars,
+# autoPairs (pares fechados automaticamente, ex.: {() [] \"\"}),
 # defThroughBrace, col0, infoRe, warnRe, grayInfo (ver langDefaults).
 # Hooks opcionais: procs em ::qc::lang::<id>:: -- init, wordTag, prepare,
 # defaultExt, newlineIndent, stderrLine, findExe (ver as embutidas).
@@ -58,11 +59,19 @@ namespace eval qc {
     variable file ""         ;# arquivo atual ("" = sem nome)
     variable status ""
     variable lncol ""
+    variable folderName ""
     variable interp ""
     variable hlAfter ""
     variable gutPending 0
     variable curPending 0
     variable linkSeq 0
+    variable mcur {}          ;# ids dos cursores extras (multi-cursor)
+    variable mseq 0
+    variable mlast ""         ;# último cursor adicionado com Ctrl+D
+    variable mword ""         ;# seleção criada pelo Ctrl+D sem seleção (busca palavras inteiras)
+    variable mapplying 0
+    variable mcol 0           ;# coluna usada pelo Shift+Alt+↑/↓
+    variable atomicDepth 0
     variable langs {}         ;# ids das linguagens, em ordem de registro
     variable L                ;# L(<id>) = dicionário da linguagem
     array set L {}
@@ -81,7 +90,7 @@ namespace eval qc {
     variable cfg
     array set cfg {
         fontsize 12 wrap 0 autoclear 1 recent {} geometry 1100x800
-        lastdir "" lang ""
+        lastdir "" lang "" folder "" sidebar 0 sidew 240
     }
     # Paleta escura (inspirada no Darcula)
     variable C
@@ -110,7 +119,7 @@ namespace eval qc {
         defWords {} defTag defname defThroughBrace 0 capType "" numberWord ""
         sub {} styles {} indentAfter {[\{\[\(]\s*$} dedentChars "\}\)\]"
         runners {} errPatterns {} col0 0 infoRe "" warnRe "" grayInfo 0
-        templates {}
+        templates {} autoPairs {() [] \{\} \"\" ''}
     }
     namespace eval lang {}
 }
@@ -256,6 +265,9 @@ proc qc::saveCfg {} {
     catch {
         set cfg(geometry) [wm geometry .]
     }
+    catch {
+        if {".side" in [.hp panes]} { set cfg(sidew) [.hp sashpos 0] }
+    }
     set out ""
     foreach k [lsort [array names cfg]] { append out [list $k $cfg($k)] \n }
     catch { writeFile [file join [homeDir] .qconsolerc] $out }
@@ -322,6 +334,16 @@ proc qc::setupTheme {} {
     ttk::style configure Status.TLabel -padding {6 2} -foreground #9a9a9a
     ttk::style configure Head.TLabel -padding {6 2} -foreground #8a8a8a \
         -background $C(trough)
+    ttk::style configure Head.TFrame -background $C(trough)
+    ttk::style configure Head.TButton -padding {4 0} -width 0 -background $C(trough) \
+        -bordercolor $C(trough) -lightcolor $C(trough) -darkcolor $C(trough) -relief flat
+    ttk::style map Head.TButton -background [list pressed $C(accent) active $C(uiactive)]
+    ttk::style configure Treeview -background $C(gutbg) -fieldbackground $C(gutbg) \
+        -foreground $C(edfg) -bordercolor $C(gutbg) -lightcolor $C(gutbg) \
+        -darkcolor $C(gutbg) -indent 14 \
+        -rowheight [expr {[font metrics TkDefaultFont -linespace] + 5}]
+    ttk::style map Treeview -background [list selected $C(sel)] \
+        -foreground [list selected #ffffff]
 }
 
 # ---------------------------------------------------------------------------
@@ -379,7 +401,9 @@ proc qc::buildUI {} {
     }
     pack .tb.lang -side right -padx 4
 
-    # Painéis editor / console
+    # Painel lateral (árvore de arquivos) | painéis editor / console
+    ttk::panedwindow .hp -orient horizontal
+    buildSide
     ttk::panedwindow .pw -orient vertical
 
     set f [ttk::frame .pw.ed]
@@ -390,7 +414,7 @@ proc qc::buildUI {} {
         -font QcMono -undo 1 -maxundo 0 -autoseparators 1 \
         -wrap [expr {$cfg(wrap) ? "word" : "none"}] \
         -bd 0 -highlightthickness 0 -padx 6 -pady 4 -tabstyle wordprocessor \
-        -yscrollcommand qc::edYscroll -xscrollcommand [list $f.sx set]]
+        -yscrollcommand qc::edYscroll -xscrollcommand qc::edXscroll]
     ttk::scrollbar $f.sy -orient vertical -command [list $ed yview]
     ttk::scrollbar $f.sx -orient horizontal -command [list $ed xview]
     buildFindBar $f.find
@@ -417,6 +441,7 @@ proc qc::buildUI {} {
 
     .pw add .pw.ed -weight 3
     .pw add .pw.co -weight 1
+    .hp add .pw -weight 1
 
     # Barra de status
     ttk::frame .sb
@@ -428,7 +453,7 @@ proc qc::buildUI {} {
 
     pack .tb -side top -fill x
     pack .sb -side bottom -fill x
-    pack .pw -side top -fill both -expand 1
+    pack .hp -side top -fill both -expand 1
 
     setupTags
     installProxy $ed
@@ -461,6 +486,8 @@ proc qc::buildMenus {} {
     $m add cascade -label "Novo a partir de modelo" -menu [menu $m.tpl -tearoff 0]
     $m add command -label "Abrir…"             -accelerator Ctrl+O       -command qc::openFile
     $m add cascade -label "Recentes"           -menu [menu $m.recent -tearoff 0]
+    $m add command -label "Abrir pasta…"       -accelerator Ctrl+Shift+O -command qc::openFolder
+    $m add command -label "Fechar pasta"                                 -command qc::closeFolder
     $m add separator
     $m add command -label "Salvar"             -accelerator Ctrl+S       -command qc::save
     $m add command -label "Salvar como…"       -accelerator Ctrl+Shift+S -command qc::saveAs
@@ -479,8 +506,11 @@ proc qc::buildMenus {} {
     $m add command -label "Colar"              -accelerator Ctrl+V       -command {qc::paste $::qc::ed}
     $m add command -label "Selecionar tudo"    -accelerator Ctrl+A       -command {qc::selectAll $::qc::ed}
     $m add separator
-    $m add command -label "Duplicar linha"     -accelerator Ctrl+D       -command qc::duplicateLine
+    $m add command -label "Duplicar linha"     -accelerator Ctrl+Shift+D -command qc::duplicateLine
     $m add command -label "Comentar/descomentar" -accelerator Ctrl+/     -command qc::toggleComment
+    $m add separator
+    $m add command -label "Selecionar próxima ocorrência" -accelerator Ctrl+D -command {focus $::qc::ed; qc::selectNext}
+    $m add command -label "Selecionar todas as ocorrências" -accelerator Alt+F3 -command {focus $::qc::ed; qc::selectAllOcc}
     $m add separator
     $m add command -label "Localizar…"         -accelerator Ctrl+F       -command {qc::showFind 0}
     $m add command -label "Substituir…"        -accelerator Ctrl+H       -command {qc::showFind 1}
@@ -500,6 +530,10 @@ proc qc::buildMenus {} {
     $m add command -label "Executar"           -accelerator Ctrl+R       -command {qc::run 0}
     $m add command -label "Executar seleção"   -accelerator Ctrl+Shift+R -command {qc::run 1}
     $m add command -label "Interromper"        -accelerator Ctrl+Break   -command qc::stop -state disabled
+    $m add command -label "Executar comando do projeto" -accelerator Ctrl+Alt+R -command qc::runMain
+    $m add cascade -label "Comandos do projeto" -menu [menu $m.proj -tearoff 0 \
+        -postcommand qc::updateProjMenu]
+    $m add command -label "Editar comandos do projeto (.qconsole)" -command qc::editProjectFile
     $m add separator
     $m add command -label "Limpar saída"       -accelerator Ctrl+W       -command qc::clearConsole
     $m add checkbutton -label "Limpar saída antes de executar" -variable ::qc::cfg(autoclear)
@@ -513,6 +547,8 @@ proc qc::buildMenus {} {
     $m add command -label "Fonte padrão"       -accelerator Ctrl+0       -command {qc::zoom 0}
     $m add separator
     $m add checkbutton -label "Quebra de linha" -variable ::qc::cfg(wrap) -command qc::applyWrap
+    $m add checkbutton -label "Painel de arquivos" -accelerator Ctrl+B \
+        -variable ::qc::cfg(sidebar) -command qc::applySide
 
     set m [menu .mb.help -tearoff 0]
     .mb add cascade -label Ajuda -menu $m
@@ -586,6 +622,7 @@ proc qc::setupTags {} {
     $ed tag configure found     -background $C(found)
     $ed tag configure bmatch    -background $C(bmatch) -font QcMonoB
     $ed tag configure bbad      -background $C(bbad)
+    $ed tag configure msel      -background $C(sel)
     $ed tag lower curline
 
     $con tag configure stdout -foreground $C(confg)
@@ -625,7 +662,10 @@ proc qc::setupBindings {} {
         <Control-q>         qc::quit
         <Control-r>         {qc::run 0}
         <Control-Return>    {qc::run 0}
+        <Control-Alt-r>     qc::runMain
         <Control-R>         {qc::run 1}
+        <Control-O>         qc::openFolder
+        <Control-b>         qc::toggleSide
         <Control-Break>     qc::stop
         <Control-Pause>     qc::stop
         <Control-w>         qc::clearConsole
@@ -634,6 +674,7 @@ proc qc::setupBindings {} {
         <Control-h>         {qc::showFind 1}
         <F3>                {qc::findNext 1}
         <Shift-F3>          {qc::findNext 0}
+        <Alt-F3>            {focus $::qc::ed; qc::selectAllOcc}
         <Control-l>         qc::gotoDialog
         <Control-plus>      {qc::zoom 1}
         <Control-equal>     {qc::zoom 1}
@@ -655,10 +696,12 @@ proc qc::setupBindings {} {
     catch {bind QcEdit <ISO_Left_Tab> {qc::indent 0; break}}
     bind QcEdit <Return>        {qc::newline; break}
     bind QcEdit <KP_Enter>      {qc::newline; break}
-    bind QcEdit <braceright>    {qc::closeChar "\}"; break}
-    bind QcEdit <parenright>    {qc::closeChar ")"; break}
-    bind QcEdit <bracketright>  {qc::closeChar "\]"; break}
-    bind QcEdit <Control-d>     {qc::duplicateLine; break}
+    bind QcEdit <KeyPress>      {if {[qc::keyChar %A %s]} break}
+    bind QcEdit <BackSpace>     {qc::backspace; break}
+    bind QcEdit <Control-d>     {qc::selectNext; break}
+    bind QcEdit <Control-D>     {qc::duplicateLine; break}
+    bind QcEdit <Shift-Alt-Up>   {qc::addCaretLine -1; break}
+    bind QcEdit <Shift-Alt-Down> {qc::addCaretLine 1; break}
     bind QcEdit <Control-slash> {qc::toggleComment; break}
     bind QcEdit <<Paste>>       {qc::paste %W; break}
     bind QcEdit <Control-MouseWheel> {qc::zoom [expr {%D > 0 ? 1 : -1}]; break}
@@ -666,7 +709,15 @@ proc qc::setupBindings {} {
     bind QcEdit <<Undo>>        {qc::editCmd undo; break}
     bind QcEdit <<Redo>>        {qc::editCmd redo; break}
 
-    bindtags $ed [list $ed QcKeys QcEdit Text . all]
+    # QcMulti vem antes de tudo: com vários cursores ativos, aplica a tecla
+    # em cada um deles
+    bind QcMulti <KeyPress>          {qc::multiKey %K %A %s}
+    bind QcMulti <Button-1>          {qc::multiClear}
+    bind QcMulti <Button-2>          {qc::multiClear}
+    bind QcMulti <Control-Button-1>  {qc::addCaretAt %x %y; break}
+    bind QcMulti <<Paste>>           {if {[llength $::qc::mcur]} {qc::multiApply {qc::paste $::qc::ed}; break}}
+
+    bindtags $ed [list $ed QcMulti QcKeys QcEdit Text . all]
     bindtags $con [list $con QcKeys Text . all]
     foreach e {.pw.ed.find.pat .pw.ed.find.rep} {
         bindtags $e [list $e QcKeys TEntry . all]
@@ -705,6 +756,406 @@ proc qc::edProxy {args} {
         }
     }
     return $r
+}
+
+# ---------------------------------------------------------------------------
+# Painel lateral: árvore de arquivos da pasta aberta
+# ---------------------------------------------------------------------------
+# Os itens da árvore têm como id o caminho completo; as subpastas são lidas
+# só quando abertas (até lá têm um filho "\x01<caminho>" de marcação).
+
+proc qc::buildSide {} {
+    ttk::frame .side
+    ttk::frame .side.head -style Head.TFrame
+    ttk::label .side.head.l -textvariable ::qc::folderName -style Head.TLabel -anchor w
+    ttk::button .side.head.r -text ⟳ -style Head.TButton -takefocus 0 \
+        -command qc::refreshFolder
+    ttk::button .side.head.x -text ✕ -style Head.TButton -takefocus 0 \
+        -command qc::closeFolder
+    pack .side.head.x .side.head.r -side right
+    pack .side.head.l -side left -fill x -expand 1
+    set t [ttk::treeview .side.t -show tree -selectmode browse \
+        -yscrollcommand {.side.sy set}]
+    ttk::scrollbar .side.sy -orient vertical -command [list $t yview]
+    grid .side.head - -sticky ew
+    grid $t .side.sy -sticky nsew
+    grid columnconfigure .side 0 -weight 1
+    grid rowconfigure .side 1 -weight 1
+    $t tag configure dir -foreground $::qc::C(uifg)
+    bind $t <<TreeviewOpen>>  {qc::treeFill [.side.t focus]}
+    bind $t <ButtonRelease-1> {qc::treeClick %x %y}
+    bind $t <Return>          {qc::treeActivate [.side.t focus]}
+}
+
+proc qc::treeFill {item} {
+    set t .side.t
+    if {$item eq "" || ![$t exists $item]} return
+    set kids [$t children $item]
+    if {[llength $kids] == 1 && [string index [lindex $kids 0] 0] eq "\x01"} {
+        fillDir $item $item
+    }
+}
+
+# Lista um diretório na árvore (pastas primeiro; arquivos ocultos de fora).
+proc qc::fillDir {parent dir} {
+    set t .side.t
+    $t delete [$t children $parent]
+    set dirs {}
+    set files {}
+    foreach p [glob -nocomplain -directory $dir *] {
+        if {[file isdirectory $p]} { lappend dirs $p } else { lappend files $p }
+    }
+    foreach p [lsort -dictionary $dirs] {
+        $t insert $parent end -id $p -text [file tail $p] -tags dir
+        $t insert $p end -id "\x01$p" -text ""
+    }
+    foreach p [lsort -dictionary $files] {
+        $t insert $parent end -id $p -text [file tail $p] -tags file
+    }
+}
+
+proc qc::treeClick {x y} {
+    set t .side.t
+    set item [$t identify item $x $y]
+    if {$item eq "" || [string match *indicator* [$t identify element $x $y]]} return
+    treeActivate $item
+}
+
+# Arquivo: abre no editor. Pasta: abre/fecha o nó.
+proc qc::treeActivate {item} {
+    set t .side.t
+    if {$item eq "" || ![$t exists $item]} return
+    if {[$t tag has dir $item]} {
+        set open [expr {![$t item $item -open]}]
+        if {$open} { treeFill $item }
+        $t item $item -open $open
+        return
+    }
+    if {$item ne $::qc::file} { openFile $item }
+    focus $::qc::ed
+}
+
+proc qc::openFolder {{dir ""}} {
+    variable cfg
+    if {$dir eq ""} {
+        set opts [list -parent . -title "Abrir pasta" -mustexist 1]
+        foreach d [list $cfg(folder) $cfg(lastdir)] {
+            if {$d ne "" && [file isdirectory $d]} { lappend opts -initialdir $d; break }
+        }
+        set dir [tk_chooseDirectory {*}$opts]
+        if {$dir eq ""} {
+            if {$cfg(folder) eq ""} { set cfg(sidebar) 0 }
+            return
+        }
+    }
+    set cfg(folder) [file normalize $dir]
+    set cfg(lastdir) $cfg(folder)
+    set ::qc::folderName [file tail $cfg(folder)]
+    fillDir {} $cfg(folder)
+    showSide 1
+    treeReveal
+}
+
+proc qc::closeFolder {} {
+    variable cfg
+    set cfg(folder) ""
+    .side.t delete [.side.t children {}]
+    showSide 0
+}
+
+# Relê a pasta, mantendo abertas as subpastas que estavam abertas.
+proc qc::refreshFolder {} {
+    variable cfg
+    if {$cfg(folder) eq "" || ![file isdirectory $cfg(folder)]} return
+    set t .side.t
+    set open {}
+    set stack [$t children {}]
+    while {[llength $stack]} {
+        set stack [lassign $stack i]
+        if {[$t item $i -open]} {
+            lappend open $i
+            lappend stack {*}[$t children $i]
+        }
+    }
+    set sel [$t selection]
+    set top [$t identify item 5 5]
+    fillDir {} $cfg(folder)
+    foreach i $open {
+        if {[$t exists $i]} { fillDir $i $i; $t item $i -open 1 }
+    }
+    set keep {}
+    foreach i $sel { if {[$t exists $i]} { lappend keep $i } }
+    $t selection set $keep
+    if {$top ne "" && [$t exists $top]} { $t see $top }
+}
+
+# Seleciona na árvore o arquivo aberto no editor (abrindo as pastas dele).
+proc qc::treeReveal {} {
+    variable cfg
+    variable file
+    set t .side.t
+    if {$file eq "" || $cfg(folder) eq "" || ".side" ni [.hp panes]} return
+    set root [file normalize $cfg(folder)]
+    if {[string first $root/ $file] != 0} {
+        $t selection set {}
+        return
+    }
+    set p $root
+    foreach part [lrange [file split [string range $file [string length $root]+1 end]] 0 end-1] {
+        set p [file join $p $part]
+        if {![$t exists $p]} return
+        treeFill $p
+        $t item $p -open 1
+    }
+    if {[$t exists $file]} {
+        $t selection set [list $file]
+        $t focus $file
+        $t see $file
+    }
+}
+
+proc qc::showSide {on} {
+    variable cfg
+    set cfg(sidebar) $on
+    set shown [expr {".side" in [.hp panes]}]
+    if {$on && !$shown} {
+        .hp insert 0 .side -weight 0
+        update idletasks
+        catch {.hp sashpos 0 $cfg(sidew)}
+        after idle [list catch [list .hp sashpos 0 $cfg(sidew)]]
+    } elseif {!$on && $shown} {
+        catch {set cfg(sidew) [.hp sashpos 0]}
+        .hp forget .side
+    }
+}
+
+# Ctrl+B / Exibir > Painel de arquivos
+proc qc::toggleSide {} {
+    variable cfg
+    set cfg(sidebar) [expr {!$cfg(sidebar)}]
+    applySide
+}
+
+proc qc::applySide {} {
+    variable cfg
+    if {!$cfg(sidebar)} {
+        showSide 0
+    } elseif {$cfg(folder) eq "" || ![file isdirectory $cfg(folder)]} {
+        openFolder
+    } else {
+        if {![llength [.side.t children {}]]} { openFolder $cfg(folder) }
+        showSide 1
+        treeReveal
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Comandos do projeto (arquivo .qconsole)
+# ---------------------------------------------------------------------------
+# Um arquivo .qconsole na raiz do projeto define comandos (nome {comando}).
+# Ctrl+Alt+R executa o primeiro; Ctrl+R continua executando o arquivo atual
+# e Ctrl+Shift+R a seleção. O comando roda com "sh -c" na pasta do
+# .qconsole; %F vira o arquivo aberto no editor e %R a raiz do projeto.
+
+set qc::projName .qconsole
+
+# Procura o .qconsole subindo a partir da pasta do arquivo atual e da pasta
+# aberta no painel lateral.
+proc qc::projectFile {} {
+    variable file
+    variable cfg
+    set starts {}
+    if {$file ne ""} { lappend starts [file dirname $file] }
+    if {$cfg(folder) ne ""} { lappend starts $cfg(folder) }
+    foreach d $starts {
+        while 1 {
+            set f [file join $d $::qc::projName]
+            if {[file isfile $f]} { return $f }
+            set up [file dirname $d]
+            if {$up eq $d} break
+            set d $up
+        }
+    }
+    return ""
+}
+
+# Lê os comandos (dicionário nome -> comando); linhas com # são comentários.
+proc qc::projectCmds {pf} {
+    set lines {}
+    foreach l [split [readFile $pf] \n] {
+        if {![regexp {^\s*#} $l]} { lappend lines $l }
+    }
+    set d [join $lines \n]
+    if {[catch {dict size $d}]} {
+        error "formato inválido: use uma linha por comando, como  run {sbt run}"
+    }
+    return $d
+}
+
+# Ctrl+Alt+R: comando principal do projeto, ou o arquivo atual se não houver.
+proc qc::runMain {} {
+    set pf [projectFile]
+    if {$pf eq ""} {
+        run 0
+        return
+    }
+    if {[catch {projectCmds $pf} cmds]} {
+        clearConsole
+        conAppend "$pf: $cmds\n" stderr
+        return
+    }
+    if {![dict size $cmds]} {
+        run 0
+        return
+    }
+    runProject $pf [lindex [dict keys $cmds] 0]
+}
+
+proc qc::shQuote {s} {
+    return '[string map {' '\''} $s]'
+}
+
+proc qc::runProject {pf name} {
+    variable R
+    variable cfg
+    variable ed
+    variable file
+    if {[info exists R(fd)]} {
+        set ::qc::status "Já existe uma execução em andamento (Ctrl+Break para interromper)"
+        return
+    }
+    if {[catch {projectCmds $pf} cmds] || ![dict exists $cmds $name]} {
+        conAppend "$pf: comando \"$name\" não encontrado\n" stderr
+        return
+    }
+    # o build lê do disco: salva o arquivo aberto antes
+    if {$file ne "" && [$ed edit modified] && ![saveTo $file]} return
+    set root [file dirname [file normalize $pf]]
+    set cmd [string map [list %F [shQuote $file] %R [shQuote $root]] [dict get $cmds $name]]
+    if {$cfg(autoclear)} { clearConsole }
+    ::qc::_edw tag remove errline 1.0 end
+    if {$::tcl_platform(platform) eq "windows"} {
+        set argv [list cmd /c $cmd]
+    } else {
+        set argv [list sh -c $cmd]
+    }
+    lassign [chan pipe] er ew
+    set old [pwd]
+    catch {cd $root}
+    set rc [catch {open |[list {*}$argv 2>@ $ew] r+} fd]
+    cd $old
+    if {$rc} {
+        close $er; close $ew
+        conAppend "Erro ao executar \"$cmd\": $fd\n" stderr
+        return
+    }
+    close $ew
+    catch {chan close $fd write}
+    foreach c [list $fd $er] {
+        fconfigure $c -blocking 0 -buffering none -translation auto
+        setEncoding $c
+    }
+    array set R [list fd $fd er $er open 2 t0 [clock milliseconds] lang $::qc::lang \
+        killed 0 jumped 0 pend "" sgr {} pid [lindex [pid $fd] 0] proj $root]
+    fileevent $fd readable [list qc::onStdout $fd]
+    fileevent $er readable [list qc::onStderr $er]
+    conAppend "▶ [join [list "$name: [dict get $cmds $name]" [file tail $root] \
+        [clock format [clock seconds] -format %H:%M:%S]] {  ·  }]\n" info
+    set R(scan) [$::qc::con index end-1c]
+    setRunning 1
+    set ::qc::status "Executando $name…"
+}
+
+# Transforma em links as referências arquivo:linha[:coluna] das linhas
+# completas da saída de um comando do projeto (ex.: erros do sbt/scalac).
+proc qc::projScan {} {
+    variable R
+    variable con
+    variable linkSeq
+    set stop [$con index "end-1c linestart"]
+    set i $R(scan)
+    set re {((?:[A-Za-z]:)?[^\s:"'()\[\]<>]*[A-Za-z0-9_]\.[A-Za-z0-9]+):([0-9]+)(?::([0-9]+))?}
+    while {[$con compare $i < $stop]} {
+        set line [$con get $i "$i lineend"]
+        set l [lindex [split $i .] 0]
+        foreach {m f n c} [regexp -all -inline -indices -- $re $line] {
+            set path [string range $line {*}$f]
+            if {[file pathtype $path] ne "absolute"} { set path [file join $R(proj) $path] }
+            if {![file isfile $path]} continue
+            set path [file normalize $path]
+            set ln [string range $line {*}$n]
+            set col [expr {[lindex $c 0] >= 0 ? [string range $line {*}$c] - 1 : 0}]
+            set lt link[incr linkSeq]
+            $con tag add link $l.[lindex $m 0] $l.[expr {[lindex $m 1] + 1}]
+            $con tag add $lt $l.[lindex $m 0] $l.[expr {[lindex $m 1] + 1}]
+            $con tag bind $lt <1> [list qc::openAt $path $ln [expr {max($col, 0)}]]
+        }
+        set i [$con index "$i +1 line"]
+    }
+    set R(scan) $i
+}
+
+proc qc::openAt {path line col} {
+    if {$path ne $::qc::file} {
+        openFile $path
+        if {$::qc::file ne $path} return
+    }
+    gotoLine $line $col
+}
+
+proc qc::updateProjMenu {} {
+    set m .mb.script.proj
+    $m delete 0 end
+    set pf [projectFile]
+    if {$pf eq ""} {
+        $m add command -label "(nenhum $::qc::projName encontrado)" -state disabled
+        return
+    }
+    if {[catch {projectCmds $pf} cmds]} {
+        $m add command -label "($::qc::projName inválido)" -state disabled
+        return
+    }
+    set first 1
+    dict for {name cmd} $cmds {
+        $m add command -label "$name — $cmd" -command [list qc::runProject $pf $name] \
+            -accelerator [expr {$first ? "Ctrl+Alt+R" : ""}]
+        set first 0
+    }
+}
+
+# Abre o .qconsole do projeto; se não existir, cria um modelo na pasta aberta
+# no painel (ou na pasta do arquivo atual).
+proc qc::editProjectFile {} {
+    variable cfg
+    variable file
+    set pf [projectFile]
+    if {$pf eq ""} {
+        if {$cfg(folder) ne ""} {
+            set root $cfg(folder)
+        } elseif {$file ne ""} {
+            set root [file dirname $file]
+        } else {
+            set root [tk_chooseDirectory -parent . -title "Pasta do projeto" -mustexist 1]
+            if {$root eq ""} return
+        }
+        set pf [file join $root $::qc::projName]
+        if {[file exists [file join $root build.sbt]]} {
+            set cmds "run   {sbt run}\ntest  {sbt test}\nbuild {sbt compile}"
+        } elseif {[file exists [file join $root Makefile]]} {
+            set cmds "run   {make run}\nbuild {make}\ntest  {make test}"
+        } else {
+            set cmds "run   {echo \"defina o comando em $::qc::projName\"}"
+        }
+        writeFile $pf "# Comandos do projeto para o qconsole: uma linha por comando, nome {comando}.
+# Ctrl+Alt+R executa o primeiro; os demais ficam em Executar > Comandos do projeto.
+# Ctrl+R continua executando o arquivo atual e Ctrl+Shift+R a seleção.
+# Os comandos rodam com sh -c nesta pasta. %F = arquivo aberto no editor,
+# %R = esta pasta. Referências arquivo:linha:coluna na saída viram links.
+$cmds
+"
+        if {$cfg(folder) ne ""} { refreshFolder }
+    }
+    openFile $pf
 }
 
 # ---------------------------------------------------------------------------
@@ -897,6 +1348,12 @@ proc qc::off2idx {starts off} {
 proc qc::edYscroll {args} {
     .pw.ed.sy set {*}$args
     schedGutter
+    if {[llength $::qc::mcur]} { after idle qc::drawCarets }
+}
+
+proc qc::edXscroll {args} {
+    .pw.ed.sx set {*}$args
+    if {[llength $::qc::mcur]} { after idle qc::drawCarets }
 }
 
 proc qc::schedGutter {} {
@@ -963,6 +1420,7 @@ proc qc::updateCursor {} {
     ::qc::_edw tag add curline "insert linestart" "insert lineend +1c"
     matchBrackets
     schedGutter
+    drawCarets
 }
 
 # Verdadeiro se a posição está dentro de string/comentário (pelo destaque).
@@ -1036,16 +1494,21 @@ proc qc::enclosingOpen {idx} {
 # Comandos de edição
 # ---------------------------------------------------------------------------
 
-# Executa várias alterações como um único passo de desfazer.
+# Executa várias alterações como um único passo de desfazer (aninhável).
 proc qc::atomic {script} {
+    variable atomicDepth
     set ed $::qc::ed
-    $ed edit separator
-    $ed configure -autoseparators 0
+    if {[incr atomicDepth] == 1} {
+        $ed edit separator
+        $ed configure -autoseparators 0
+    }
     try {
         uplevel 1 $script
     } finally {
-        $ed configure -autoseparators 1
-        $ed edit separator
+        if {[incr atomicDepth -1] == 0} {
+            $ed configure -autoseparators 1
+            $ed edit separator
+        }
     }
 }
 
@@ -1069,6 +1532,10 @@ proc qc::selectAll {w} {
 
 proc qc::paste {w} {
     if {[catch {clipboard get} data]} return
+    if {$w eq $::qc::ed && [llength $::qc::mcur] && !$::qc::mapplying} {
+        multiApply [list qc::paste $w]
+        return
+    }
     atomic {
         catch {$w delete sel.first sel.last}
         $w insert insert $data
@@ -1178,6 +1645,442 @@ proc qc::duplicateLine {} {
     $ed insert "$z.0 lineend" "\n$chunk"
     $ed mark set insert "insert +[expr {$z - $a + 1}] lines"
     $ed see insert
+}
+
+# ---------------------------------------------------------------------------
+# Fechamento automático de pares
+# ---------------------------------------------------------------------------
+
+# Abre/fecha dos pares da linguagem corrente: {aberturas fechamentos}.
+proc qc::pairLists {} {
+    set o {}; set c {}
+    foreach p [lget autoPairs] {
+        lappend o [string index $p 0]
+        lappend c [string index $p 1]
+    }
+    return [list $o $c]
+}
+
+# <KeyPress> do editor: trata os caracteres de pares; 1 = tratado.
+proc qc::keyChar {ch state} {
+    if {$state & 0x0C || [string length $ch] != 1} { return 0 }   ;# Ctrl / Alt
+    lassign [pairLists] o c
+    if {$ch ni $o && $ch ni $c && $ch ni {) ] \}}} { return 0 }
+    typeChar $ch
+    return 1
+}
+
+# Digita um caractere no cursor, com a lógica de pares:
+#  - abertura com seleção: envolve a seleção (que continua selecionada);
+#  - abertura sem seleção: insere o par e deixa o cursor no meio, se o
+#    próximo caractere for espaço, fim de linha ou fechamento;
+#  - fechamento igual ao próximo caractere: só passa por cima dele.
+proc qc::typeChar {ch} {
+    variable ed
+    lassign [pairLists] opens closes
+    set hasSel [llength [::qc::_edw tag ranges sel]]
+    set prev [expr {[$ed compare insert == 1.0] ? "" : [$ed get "insert -1c"]}]
+    set next [$ed get insert]
+    set k [lsearch -exact $opens $ch]
+    if {$k >= 0} {
+        set cl [lindex $closes $k]
+        if {$hasSel} {
+            set a [$ed index sel.first]
+            set b [$ed index sel.last]
+            atomic {
+                $ed insert $b $cl
+                $ed insert $a $ch
+            }
+            ::qc::_edw tag remove sel 1.0 end
+            ::qc::_edw tag add sel "$a +1c" "$b +1c"
+            $ed mark set insert "$b +1c"
+            $ed see insert
+            return
+        }
+        if {$ch eq $cl && $next eq $ch && $prev ne "\\"} {
+            $ed mark set insert "insert +1c"
+            return
+        }
+        set ok [expr {$next eq "" || [string is space $next] || $next in $closes
+                      || $next in {, ; : .}}]
+        if {$ok && $ch eq $cl} {
+            # aspas: não depois de letra/dígito (ex.: don't) nem de "\"
+            set ok [expr {![regexp {[\w\\]} $prev] && $prev ne $ch}]
+        }
+        if {$ok} {
+            $ed insert insert $ch$cl
+            $ed mark set insert "insert -1c"
+        } else {
+            $ed insert insert $ch
+        }
+        $ed see insert
+        return
+    }
+    if {!$hasSel && $next eq $ch && $ch in $closes} {
+        $ed mark set insert "insert +1c"
+        return
+    }
+    if {$ch in {) ] \}}} {
+        closeChar $ch
+        return
+    }
+    catch {$ed delete sel.first sel.last}
+    $ed insert insert $ch
+    $ed see insert
+}
+
+# Backspace: apaga a seleção, ou o caractere anterior; num par vazio
+# ("(|)", "\"|\"") apaga os dois.
+proc qc::backspace {} {
+    variable ed
+    if {[llength [::qc::_edw tag ranges sel]]} {
+        $ed delete sel.first sel.last
+    } elseif {[$ed compare insert > 1.0]} {
+        if {[$ed get "insert -1c" "insert +1c"] in [lget autoPairs]} {
+            $ed delete "insert -1c" "insert +1c"
+        } else {
+            $ed delete "insert -1c"
+        }
+    }
+    $ed see insert
+}
+
+proc qc::deleteFwd {} {
+    variable ed
+    if {[llength [::qc::_edw tag ranges sel]]} {
+        $ed delete sel.first sel.last
+    } else {
+        $ed delete insert
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Vários cursores (Ctrl+D / Alt+F3 / Ctrl+clique)
+# ---------------------------------------------------------------------------
+# O cursor principal é o próprio insert/sel do Text. Cada cursor extra é um
+# par de marcas qcm<id>a / qcm<id>b (início/fim da seleção dele). Uma edição
+# é aplicada a cada cursor em sequência: o cursor vira temporariamente o
+# insert/sel, o comando de edição normal roda e o resultado volta às marcas.
+
+# Marca a = âncora da seleção, b = posição do cursor (b pode vir antes de a).
+proc qc::regSave {id} {
+    set i [::qc::_edw index insert]
+    set anchor $i
+    if {[llength [::qc::_edw tag ranges sel]]} {
+        set f [::qc::_edw index sel.first]
+        set anchor $f
+        if {$i eq $f} { set anchor [::qc::_edw index sel.last] }
+    }
+    regSet $id $anchor $i
+}
+
+proc qc::regSet {id anchor caret} {
+    ::qc::_edw mark set qcm${id}a $anchor
+    ::qc::_edw mark set qcm${id}b $caret
+    # seleção: o texto inserido nas bordas (por cursores vizinhos) fica fora
+    if {[::qc::_edw compare $anchor == $caret]} {
+        lassign {left left} ga gb
+    } elseif {[::qc::_edw compare $anchor < $caret]} {
+        lassign {right left} ga gb
+    } else {
+        lassign {left right} ga gb
+    }
+    ::qc::_edw mark gravity qcm${id}a $ga
+    ::qc::_edw mark gravity qcm${id}b $gb
+}
+
+# Início e fim (em ordem) da seleção do cursor.
+proc qc::regGet {id} {
+    set a [::qc::_edw index qcm${id}a]
+    set b [::qc::_edw index qcm${id}b]
+    if {[::qc::_edw compare $a > $b]} { return [list $b $a] }
+    return [list $a $b]
+}
+
+proc qc::regCaret {id} {
+    return [::qc::_edw index qcm${id}b]
+}
+
+proc qc::regLoad {id} {
+    lassign [regGet $id] a b
+    ::qc::_edw tag remove sel 1.0 end
+    if {[::qc::_edw compare $a < $b]} { ::qc::_edw tag add sel $a $b }
+    $::qc::ed mark set insert [regCaret $id]
+}
+
+proc qc::multiApply {script} {
+    variable ed
+    variable mcur
+    variable mapplying
+    regSave p
+    set mapplying 1
+    try {
+        atomic {
+            foreach id [concat $mcur p] {
+                regLoad $id
+                uplevel #0 $script
+                regSave $id
+            }
+        }
+    } finally {
+        set mapplying 0
+        regLoad p
+        ::qc::_edw mark unset qcmpa qcmpb
+    }
+    # cursores que acabaram na mesma posição viram um só
+    set seen [list [regKey [::qc::_edw index insert] [::qc::_edw index insert]]]
+    if {[llength [::qc::_edw tag ranges sel]]} {
+        lappend seen [regKey [::qc::_edw index sel.first] [::qc::_edw index sel.last]]
+    }
+    set keep {}
+    foreach id $mcur {
+        set key [regKey {*}[regGet $id]]
+        if {$key in $seen} {
+            ::qc::_edw mark unset qcm${id}a qcm${id}b
+        } else {
+            lappend seen $key
+            lappend keep $id
+        }
+    }
+    set mcur $keep
+    multiRedraw
+    $ed see insert
+}
+
+proc qc::regKey {a b} { return "$a $b" }
+
+proc qc::multiRedraw {} {
+    variable mcur
+    ::qc::_edw tag remove msel 1.0 end
+    foreach id $mcur {
+        lassign [regGet $id] a b
+        if {[::qc::_edw compare $a < $b]} { ::qc::_edw tag add msel $a $b }
+    }
+    ::qc::_edw tag raise msel
+    drawCarets
+}
+
+# Os cursores extras são frames finos posicionados sobre o Text.
+proc qc::drawCarets {} {
+    variable ed
+    variable mcur
+    variable C
+    set i 0
+    foreach id $mcur {
+        set bb [::qc::_edw bbox qcm${id}b]
+        if {$bb eq ""} continue
+        lassign $bb x y - h
+        set w $ed.mc$i
+        if {![winfo exists $w]} {
+            frame $w -background $C(caret) -width 2 -bd 0 -cursor xterm
+        }
+        # o Tk desenha o próprio cursor centrado na borda do caractere
+        place $w -x [expr {$x - 1}] -y $y -width 2 -height $h -bordermode outside
+        incr i
+    }
+    while {[winfo exists $ed.mc$i]} {
+        place forget $ed.mc$i
+        incr i
+    }
+}
+
+proc qc::multiClear {} {
+    variable mcur
+    variable mlast ""
+    if {![llength $mcur]} return
+    foreach id $mcur { ::qc::_edw mark unset qcm${id}a qcm${id}b }
+    set mcur {}
+    ::qc::_edw tag remove msel 1.0 end
+    drawCarets
+}
+
+proc qc::multiAdd {a b} {
+    variable mcur
+    variable mseq
+    set id [incr mseq]
+    regSet $id $a $b
+    lappend mcur $id
+    return $id
+}
+
+# Tecla com vários cursores ativos (bindtag QcMulti, antes das demais).
+proc qc::multiKey {K A s} {
+    variable mcur
+    if {![llength $mcur]} return
+    if {[string match *_L $K] || [string match *_R $K]
+        || $K in {Caps_Lock Num_Lock ISO_Level3_Shift Mode_switch Multi_key}} return
+    if {$s & 0x0C} {
+        # Ctrl+D continua adicionando, Ctrl+V cola em todos (via qc::paste),
+        # Ctrl+S/R não mexem no texto; o resto volta a um cursor só
+        if {!($s & 4 && [string tolower $K] in {d v s r})
+            && !($s & 8 && $K in {Up Down})} { multiClear }
+        return
+    }
+    set shift [expr {$s & 1}]
+    switch -- $K {
+        Escape            { multiClear; return -code break }
+        BackSpace         { multiApply qc::backspace }
+        Delete - KP_Delete { multiApply qc::deleteFwd }
+        Return - KP_Enter { multiApply qc::newline }
+        Tab               { multiApply {qc::indent 1} }
+        Left - Right - Home - End - Up - Down {
+            multiApply [list qc::moveCaret $K $shift]
+        }
+        default {
+            if {$A ne "" && [string is print $A]} {
+                multiApply [list qc::typeChar $A]
+            } else {
+                # PageUp/PageDown voltam a um cursor; teclas mortas (acentos)
+                # e outras sem caractere são ignoradas
+                if {$K in {Prior Next}} { multiClear }
+                return
+            }
+        }
+    }
+    return -code break
+}
+
+# Move o cursor; com shift, estende a seleção a partir da âncora.
+proc qc::moveCaret {k {shift 0}} {
+    variable ed
+    set hasSel [llength [::qc::_edw tag ranges sel]]
+    set ins [$ed index insert]
+    if {$hasSel && !$shift && $k eq "Left"} {
+        set to sel.first
+    } elseif {$hasSel && !$shift && $k eq "Right"} {
+        set to sel.last
+    } else {
+        set to [dict get {
+            Left "insert -1c" Right "insert +1c" Home "insert linestart"
+            End "insert lineend" Up "insert -1 line" Down "insert +1 line"
+        } $k]
+    }
+    set to [$ed index $to]
+    if {[$ed compare $to > end-1c]} { set to [$ed index end-1c] }
+    set anchor $ins
+    if {$hasSel} {
+        set f [$ed index sel.first]
+        set anchor $f
+        if {$ins eq $f} { set anchor [$ed index sel.last] }
+    }
+    ::qc::_edw tag remove sel 1.0 end
+    if {$shift && [$ed compare $anchor != $to]} {
+        if {[$ed compare $anchor < $to]} {
+            ::qc::_edw tag add sel $anchor $to
+        } else {
+            ::qc::_edw tag add sel $to $anchor
+        }
+    }
+    $ed mark set insert $to
+}
+
+# Ctrl+D: sem seleção, seleciona a palavra no cursor; com seleção, adiciona
+# um cursor na próxima ocorrência do texto selecionado (dando a volta no
+# fim do arquivo). Devolve 1 se selecionou algo novo.
+proc qc::selectNext {{redraw 1}} {
+    variable ed
+    variable mcur
+    variable mlast
+    variable mword
+    if {![llength [::qc::_edw tag ranges sel]]} {
+        if {[llength $mcur]} {
+            # vários cursores sem seleção: seleciona a palavra em cada um
+            multiApply qc::selectWord
+            return 0
+        }
+        if {![selectWord]} { return 0 }
+        set mword [list [$ed index sel.first] [$ed index sel.last]]
+        return 1
+    }
+    set sa [$ed index sel.first]
+    set sb [$ed index sel.last]
+    if {![llength $mcur]} {
+        set mlast ""
+        if {$mword ne [list $sa $sb]} { set mword "" }
+    }
+    set text [$ed get $sa $sb]
+    set len [string length $text]
+    # (não usar expr aqui: ele transformaria o índice "2.10" no número 2.1)
+    set start $sb
+    if {$mlast ne "" && $mlast in $mcur} { set start [lindex [regGet $mlast] 1] }
+    set taken [list $sa]
+    foreach id $mcur { lappend taken [lindex [regGet $id] 0] }
+    for {set n 0} {$n < 100000} {incr n} {
+        set pos [::qc::_edw search -exact -forwards -- $text $start]
+        if {$pos eq ""} { return 0 }
+        set end [::qc::_edw index "$pos +${len}c"]
+        if {$pos in $taken} {
+            set ::qc::status "Todas as ocorrências já estão selecionadas ([expr {[llength $mcur] + 1}])"
+            return 0
+        }
+        set start $end
+        if {$mword ne ""} {
+            set before [expr {[$ed compare $pos == 1.0] ? "" : [$ed get "$pos -1c"]}]
+            if {[regexp {\w} $before] || [regexp {\w} [$ed get $end]]} continue
+        }
+        break
+    }
+    set mlast [multiAdd $pos $end]
+    if {$redraw} {
+        multiRedraw
+        $ed see $pos
+        set ::qc::status "[expr {[llength $mcur] + 1}] seleções"
+    }
+    return 1
+}
+
+# Seleciona a palavra no cursor (ou logo antes dele); 0 se não houver.
+proc qc::selectWord {} {
+    variable ed
+    set i insert
+    if {![regexp {\w} [$ed get insert]]} {
+        if {[$ed compare insert == 1.0] || ![regexp {\w} [$ed get "insert -1c"]]} { return 0 }
+        set i "insert -1c"
+    }
+    set a [$ed index "$i wordstart"]
+    set b [$ed index "$i wordend"]
+    ::qc::_edw tag remove sel 1.0 end
+    ::qc::_edw tag add sel $a $b
+    $ed mark set insert $b
+    return 1
+}
+
+# Alt+F3: seleciona todas as ocorrências de uma vez.
+proc qc::selectAllOcc {} {
+    variable ed
+    if {![llength [::qc::_edw tag ranges sel]] && ![selectNext]} return
+    while {[selectNext 0]} {}
+    multiRedraw
+    set ::qc::status "[expr {[llength $::qc::mcur] + 1}] seleções"
+}
+
+# Shift+Alt+↑/↓: adiciona um cursor na linha acima do cursor mais alto (ou
+# abaixo do mais baixo), na coluna do cursor original.
+proc qc::addCaretLine {dir} {
+    variable ed
+    variable mcur
+    variable mcol
+    if {![llength $mcur]} { set mcol [lindex [split [$ed index insert] .] 1] }
+    set lines [list [lindex [split [$ed index insert] .] 0]]
+    foreach id $mcur { lappend lines [lindex [split [regCaret $id] .] 0] }
+    set l [expr {$dir < 0 ? [tcl::mathfunc::min {*}$lines] - 1 : [tcl::mathfunc::max {*}$lines] + 1}]
+    set last [lindex [split [$ed index end-1c] .] 0]
+    if {$l < 1 || $l > $last} return
+    set len [lindex [split [$ed index "$l.0 lineend"] .] 1]
+    set i $l.[expr {min($mcol, $len)}]
+    multiAdd $i $i
+    multiRedraw
+    $ed see $i
+    set ::qc::status "[expr {[llength $mcur] + 1}] cursores"
+}
+
+# Ctrl+clique: adiciona um cursor (o principal continua onde estava).
+proc qc::addCaretAt {x y} {
+    variable ed
+    focus $ed
+    set i [$ed index @$x,$y]
+    multiAdd $i $i
+    multiRedraw
 }
 
 # Comenta com o prefixo da linguagem; se ela só tiver comentário de bloco
@@ -1635,6 +2538,7 @@ proc qc::confirmDiscard {} {
 
 proc qc::setContent {data} {
     variable ed
+    multiClear
     $ed delete 1.0 end
     $ed insert 1.0 $data
     $ed edit reset
@@ -1721,6 +2625,7 @@ proc qc::openFile {{path ""}} {
     if {$id ne "" && $id ne $::qc::lang} { setLang $id }
     setContent $data
     addRecent $file
+    treeReveal
     set ::qc::status "Aberto: $file"
 }
 
@@ -1762,6 +2667,9 @@ proc qc::saveTo {path} {
     $ed edit modified 0
     addRecent $path
     updateTitle
+    if {$cfg(folder) ne "" && [string first [file normalize $cfg(folder)]/ $file] == 0} {
+        refreshFolder
+    }
     set ::qc::status "Salvo: $path"
     return 1
 }
@@ -1931,7 +2839,7 @@ proc qc::run {selOnly} {
         lineoff $lineoff script $script name $name disp $disp nlines $nlines \
         pats $pats col0 [dict get $d col0] infoRe [dict get $d infoRe] \
         warnRe [dict get $d warnRe] grayInfo [dict get $d grayInfo] \
-        killed 0 jumped 0 pend "" sgr {} pid [lindex [pid $fd] 0]]
+        killed 0 jumped 0 pend "" sgr {} pid [lindex [pid $fd] 0] proj ""]
     fileevent $fd readable [list qc::onStdout $fd]
     fileevent $er readable [list qc::onStderr $er]
 
@@ -1946,7 +2854,10 @@ proc qc::run {selOnly} {
 
 proc qc::onStdout {fd} {
     set data [read $fd]
-    if {$data ne ""} { conAnsi $data stdout }
+    if {$data ne ""} {
+        conAnsi $data stdout
+        if {$::qc::R(proj) ne ""} { projScan }
+    }
     if {[eof $fd]} {
         fileevent $fd readable {}
         streamClosed
@@ -1990,7 +2901,14 @@ proc qc::conAnsi {data base} {
 }
 
 proc qc::onStderr {er} {
-    while {[gets $er line] >= 0} { errLine $line }
+    while {[gets $er line] >= 0} {
+        if {$::qc::R(proj) ne ""} {
+            conAnsi $line\n stderr
+            projScan
+        } else {
+            errLine $line
+        }
+    }
     if {[eof $er]} {
         fileevent $er readable {}
         streamClosed
@@ -2104,6 +3022,10 @@ proc qc::streamClosed {} {
         }
     }
     catch {close $R(er)}
+    if {$R(proj) ne ""} {
+        if {[$::qc::con get end-2c] ne "\n"} { conAppend \n stdout }
+        projScan
+    }
     set secs [expr {([clock milliseconds] - $R(t0)) / 1000.0}]
     if {$R(killed)} {
         conAppend "■ Interrompido após [format %.3f $secs] s\n" stderr
@@ -2150,14 +3072,17 @@ proc qc::stop {} {
 
 proc qc::showShortcuts {} {
     tk_messageBox -parent . -title "Atalhos" -message "Atalhos de teclado" -detail [join {
-        "Ctrl+R / Ctrl+Enter   Executar"
+        "Ctrl+R / Ctrl+Enter   Executar arquivo"
         "Ctrl+Shift+R          Executar seleção"
+        "Ctrl+Alt+R            Executar comando do projeto (.qconsole)"
         "Ctrl+Break            Interromper execução"
         "Ctrl+W                Limpar saída"
         "Ctrl+E                Opções de execução"
         ""
         "Ctrl+N / O / S        Novo / Abrir / Salvar"
         "Ctrl+Shift+S          Salvar como"
+        "Ctrl+Shift+O          Abrir pasta"
+        "Ctrl+B                Painel de arquivos"
         "Ctrl+F4               Fechar arquivo"
         "Ctrl+Q                Sair"
         ""
@@ -2165,7 +3090,12 @@ proc qc::showShortcuts {} {
         "Ctrl+F / Ctrl+H       Localizar / Substituir"
         "F3 / Shift+F3         Próximo / Anterior"
         "Ctrl+L                Ir para linha"
-        "Ctrl+D                Duplicar linha"
+        "Ctrl+D                Selecionar próxima ocorrência"
+        "Alt+F3                Selecionar todas as ocorrências"
+        "Ctrl+Clique           Adicionar cursor"
+        "Shift+Alt+↑ / ↓       Adicionar cursor acima / abaixo"
+        "Esc                   Voltar a um cursor"
+        "Ctrl+Shift+D          Duplicar linha"
         "Ctrl+/                Comentar linhas"
         "Tab / Shift+Tab       Indentar / Desindentar"
         "Ctrl+ + / - / 0       Tamanho da fonte"
@@ -2196,6 +3126,7 @@ qc::language tcl {
     indent   4
     indentAfter {[\{\[]\s*$}
     dedentChars "\}"
+    autoPairs {() [] \{\} \"\"}
     tokens {
         comment {(?:^|;)[ \t]*(#[^\n]*)}
         escape  {\\.}
@@ -2520,6 +3451,7 @@ qc::language scheme {
     comment  ;;
     indent   2
     dedentChars ""
+    autoPairs {() [] \{\} \"\"}
     tokens {
         comment  {;[^\n]*|#\|(?:[^|]|\|(?!#))*(?:\|#)?|#;}
         string   {"(?:[^"\\]|\\.)*"?}
@@ -2604,6 +3536,7 @@ qc::language ocaml {
     comment    "(*"
     commentEnd "*)"
     indent     2
+    autoPairs  {() [] \{\} \"\"}
     indentAfter {(?:=|->|\m(?:then|else|do|begin|struct|sig|object|in|with|try|fun|function)|[\{\[\(])\s*$}
     tokens {
         comment   {\(\*(?:[^*]|\*(?!\)))*(?:\*\))?}
@@ -2737,6 +3670,16 @@ proc qc::main {argv} {
     if {$id eq "" || $id ni $langs} { set id $cfg(lang) }
     if {$id eq "" || $id ni $langs} { set id [lindex $langs 0] }
     setLang $id
+    if {$path ne "" && [file isdirectory $path]} {
+        set cfg(folder) [file normalize $path]
+        set cfg(sidebar) 1
+        set path ""
+    }
+    if {$cfg(sidebar) && $cfg(folder) ne "" && [file isdirectory $cfg(folder)]} {
+        openFolder $cfg(folder)
+    } else {
+        set cfg(sidebar) 0
+    }
     if {$path ne ""} {
         openFile $path
     } else {

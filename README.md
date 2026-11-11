@@ -20,6 +20,16 @@ pode ser interrompida a qualquer momento.
   parênteses/chaves/colchetes
 - Indentação automática por linguagem, Tab/Shift+Tab em blocos, comentar e
   descomentar linhas, duplicar linha
+- Fechamento automático de parênteses, colchetes, chaves e aspas; com texto
+  selecionado, o par envolve a seleção
+- Vários cursores no estilo Sublime: Ctrl+D seleciona a próxima ocorrência da
+  seleção, Alt+F3 todas, Ctrl+clique ou Shift+Alt+↑/↓ adicionam cursores; o
+  que for digitado vale para todos
+- Painel lateral com a árvore de arquivos de uma pasta (Arquivo > Abrir pasta,
+  Ctrl+Shift+O; Ctrl+B mostra/esconde; `tcode pasta/` abre direto)
+- Comandos de projeto: um arquivo `.qconsole` na raiz do projeto define o que
+  o Ctrl+Alt+R executa (ex.: `sbt run`); Ctrl+R continua executando o arquivo
+  e Ctrl+Shift+R a seleção (veja abaixo)
 - Localizar/substituir (com regex e diferenciação de maiúsculas), ir para linha
 - Executar o arquivo inteiro ou só a seleção, com opções do interpretador e
   argumentos do programa configuráveis por linguagem
@@ -80,8 +90,11 @@ o interpretador, as opções passadas a ele e os argumentos do programa.
 
 | Atalho | Ação |
 |--------|------|
-| Ctrl+R / Ctrl+Enter | Executar |
+| Ctrl+R / Ctrl+Enter | Executar o arquivo |
 | Ctrl+Shift+R | Executar seleção |
+| Ctrl+Alt+R | Executar o comando do projeto (`.qconsole`) |
+| Ctrl+Shift+O | Abrir pasta |
+| Ctrl+B | Mostrar/esconder o painel de arquivos |
 | Ctrl+Break | Interromper execução |
 | Ctrl+W | Limpar saída |
 | Ctrl+E | Opções de execução |
@@ -93,10 +106,40 @@ o interpretador, as opções passadas a ele e os argumentos do programa.
 | Ctrl+F / Ctrl+H | Localizar / Substituir |
 | F3 / Shift+F3 | Próximo / Anterior |
 | Ctrl+L | Ir para linha |
-| Ctrl+D | Duplicar linha |
+| Ctrl+D | Selecionar palavra / próxima ocorrência (vários cursores) |
+| Alt+F3 | Selecionar todas as ocorrências |
+| Ctrl+clique | Adicionar cursor |
+| Shift+Alt+↑ / Shift+Alt+↓ | Adicionar cursor na linha acima / abaixo |
+| Esc | Voltar a um cursor só |
+| Ctrl+Shift+D | Duplicar linha |
 | Ctrl+/ | Comentar/descomentar linhas |
 | Tab / Shift+Tab | Indentar / Desindentar |
 | Ctrl++ / Ctrl+- / Ctrl+0 | Aumentar / diminuir / restaurar fonte |
+
+## Comandos de projeto (`.qconsole`)
+
+Um arquivo `.qconsole` na raiz do projeto lista comandos, um por linha, no
+formato `nome {comando}`. Linhas começando com `#` são comentários:
+
+```tcl
+# projeto sbt
+run   {sbt run}
+test  {sbt test}
+build {sbt compile}
+```
+
+- **Ctrl+Alt+R** executa o primeiro comando (sem `.qconsole`, executa o
+  arquivo). Os outros ficam em Executar > Comandos do projeto.
+- **Ctrl+R** continua executando o arquivo atual e **Ctrl+Shift+R** a
+  seleção.
+- O arquivo é procurado subindo a partir da pasta do arquivo aberto (e da
+  pasta aberta no painel lateral).
+- Os comandos rodam com `sh -c` na pasta do `.qconsole`. `%F` vira o arquivo
+  aberto no editor e `%R` a raiz do projeto.
+- O arquivo aberto é salvo antes de executar. Referências `arquivo:linha:coluna`
+  na saída (erros do sbt/scalac, por exemplo) viram links.
+- Executar > Editar comandos do projeto abre o `.qconsole`, ou cria um modelo
+  (com comandos sbt se houver `build.sbt`, make se houver `Makefile`).
 
 ## Configuração
 
@@ -148,7 +191,7 @@ Nos `args` do runner:
 | `%--A` | `-- args`, se houver argumentos |
 
 Outras chaves aceitas: `capType`, `numberWord`, `sub`, `styles`, `commentRe`,
-`commentEnd`, `dedentChars`, `defThroughBrace`, `col0`, `infoRe`, `warnRe`,
+`commentEnd`, `dedentChars`, `autoPairs`, `defThroughBrace`, `col0`, `infoRe`, `warnRe`,
 `grayInfo` (veja `langDefaults` no código).
 
 Hooks opcionais podem ser definidos como procs em `::qc::lang::<id>::` —
