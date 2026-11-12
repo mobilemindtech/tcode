@@ -43,7 +43,8 @@
 # %O opções do usuário, %A argumentos do programa, %--A "-- args" se houver.
 # Outras chaves: capType, numberWord, sub, styles, commentRe, dedentChars,
 # autoPairs (pares fechados automaticamente, ex.: {() [] \"\"}),
-# defThroughBrace, col0, infoRe, warnRe, grayInfo (ver langDefaults).
+# defThroughBrace, col0, infoRe, warnRe, grayInfo, rainbow (1 = parênteses
+# coloridos por nível de aninhamento; ver qc::rainbow) (ver langDefaults).
 # Hooks opcionais: procs em ::qc::lang::<id>:: -- init, wordTag, prepare,
 # defaultExt, newlineIndent, stderrLine, findExe (ver as embutidas).
 # Tags de cor disponíveis: veja qc::S; "styles" define novas.
@@ -90,8 +91,11 @@ namespace eval qc {
     variable cfg
     array set cfg {
         fontsize 12 wrap 0 autoclear 1 recent {} geometry 1100x800
-        lastdir "" lang "" folder "" sidebar 0 sidew 240
+        lastdir "" lang "" folder "" sidebar 0 sidew 240 autocomp 1
+        terminal 0 termpos side termcmd ""
     }
+    variable T                ;# terminal embutido: T(chan), T(pid), T(shown)
+    array set T {}
     # Paleta escura (inspirada no Darcula)
     variable C
     array set C {
@@ -114,12 +118,14 @@ namespace eval qc {
         annot     {#bbb529 {}}  brace     {#d0a86a {}}  directive {#629755 I}
         builtin   {#ffc66d {}}  constant  {#6897bb B}   symbol    {#9876aa {}}
     }
+    # Cores dos parênteses por nível (linguagens com "rainbow 1")
+    variable rainbow {#d0a86a #c586c0 #4fb3d9 #8fbf6a #e07b53 #9b9bf5}
     variable langDefaults {
         name ? ext {} comment "#" commentEnd "" commentRe "" indent 4 tokens {} words {}
         defWords {} defTag defname defThroughBrace 0 capType "" numberWord ""
         sub {} styles {} indentAfter {[\{\[\(]\s*$} dedentChars "\}\)\]"
         runners {} errPatterns {} col0 0 infoRe "" warnRe "" grayInfo 0
-        templates {} autoPairs {() [] \{\} \"\" ''}
+        templates {} autoPairs {() [] \{\} \"\" ''} rainbow 0
     }
     namespace eval lang {}
 }
@@ -426,8 +432,14 @@ proc qc::buildUI {} {
     grid remove $f.find
     if {$cfg(wrap)} { grid remove $f.sx }
 
+    # parte de baixo: saída | terminal (lado a lado ou um no lugar do outro)
+    ttk::panedwindow .pw.bot -orient horizontal
     set f [ttk::frame .pw.co]
-    ttk::label $f.head -text "Saída" -style Head.TLabel -anchor w
+    ttk::frame $f.head -style Head.TFrame
+    ttk::label $f.head.l -text "Saída" -style Head.TLabel -anchor w
+    ttk::button $f.head.t -text "Terminal" -style Head.TButton -takefocus 0 \
+        -command {qc::showTerminal 1}
+    pack $f.head.l -side left -fill x -expand 1
     set con [text $f.t -background $C(conbg) -foreground $C(confg) \
         -insertbackground $C(caret) -selectbackground $C(sel) \
         -selectforeground {} -inactiveselectbackground $C(sel) \
@@ -439,8 +451,11 @@ proc qc::buildUI {} {
     grid columnconfigure $f 0 -weight 1
     grid rowconfigure $f 1 -weight 1
 
+    buildTerminal
+
     .pw add .pw.ed -weight 3
-    .pw add .pw.co -weight 1
+    .pw add .pw.bot -weight 1
+    .pw.bot add .pw.co -weight 1
     .hp add .pw -weight 1
 
     # Barra de status
@@ -509,6 +524,9 @@ proc qc::buildMenus {} {
     $m add command -label "Duplicar linha"     -accelerator Ctrl+Shift+D -command qc::duplicateLine
     $m add command -label "Comentar/descomentar" -accelerator Ctrl+/     -command qc::toggleComment
     $m add separator
+    $m add command -label "Completar palavra"  -accelerator Ctrl+Espaço  -command {focus $::qc::ed; qc::acShow 1}
+    $m add checkbutton -label "Sugerir ao digitar" -variable ::qc::cfg(autocomp)
+    $m add separator
     $m add command -label "Selecionar próxima ocorrência" -accelerator Ctrl+D -command {focus $::qc::ed; qc::selectNext}
     $m add command -label "Selecionar todas as ocorrências" -accelerator Alt+F3 -command {focus $::qc::ed; qc::selectAllOcc}
     $m add separator
@@ -549,6 +567,14 @@ proc qc::buildMenus {} {
     $m add checkbutton -label "Quebra de linha" -variable ::qc::cfg(wrap) -command qc::applyWrap
     $m add checkbutton -label "Painel de arquivos" -accelerator Ctrl+B \
         -variable ::qc::cfg(sidebar) -command qc::applySide
+    $m add separator
+    $m add checkbutton -label "Terminal" -accelerator Ctrl+' \
+        -variable ::qc::cfg(terminal) -command qc::applyTerminal
+    $m add radiobutton -label "Terminal ao lado da saída" -value side \
+        -variable ::qc::cfg(termpos) -command qc::applyTerminal
+    $m add radiobutton -label "Terminal no lugar da saída" -value replace \
+        -variable ::qc::cfg(termpos) -command qc::applyTerminal
+    $m add command -label "Comando do terminal…" -command qc::termDialog
 
     set m [menu .mb.help -tearoff 0]
     .mb add cascade -label Ajuda -menu $m
@@ -666,6 +692,8 @@ proc qc::setupBindings {} {
         <Control-R>         {qc::run 1}
         <Control-O>         qc::openFolder
         <Control-b>         qc::toggleSide
+        <Control-apostrophe> qc::toggleTerminal
+        <Control-grave>     qc::toggleTerminal
         <Control-Break>     qc::stop
         <Control-Pause>     qc::stop
         <Control-w>         qc::clearConsole
@@ -698,6 +726,9 @@ proc qc::setupBindings {} {
     bind QcEdit <KP_Enter>      {qc::newline; break}
     bind QcEdit <KeyPress>      {if {[qc::keyChar %A %s]} break}
     bind QcEdit <BackSpace>     {qc::backspace; break}
+    # com seleção, ←/→ vão para o início/fim dela
+    bind QcEdit <Left>          {if {[qc::selJump Left %s]} break}
+    bind QcEdit <Right>         {if {[qc::selJump Right %s]} break}
     bind QcEdit <Control-d>     {qc::selectNext; break}
     bind QcEdit <Control-D>     {qc::duplicateLine; break}
     bind QcEdit <Shift-Alt-Up>   {qc::addCaretLine -1; break}
@@ -711,13 +742,22 @@ proc qc::setupBindings {} {
 
     # QcMulti vem antes de tudo: com vários cursores ativos, aplica a tecla
     # em cada um deles
+    # QcComp vem antes de tudo: com o popup de sugestões aberto, as setas,
+    # Enter, Tab e Esc são dele
+    bind QcComp <KeyPress>        {qc::acKey %K %A %s}
+    bind QcComp <Control-space>   {qc::acShow 1; break}
+    bind QcComp <Button>          {qc::acHide}
+    bind QcComp <MouseWheel>      {qc::acHide}
+    bind QcComp <FocusOut>        {qc::acHide}
+    bind QcComp <Configure>       {qc::acHide}
+
     bind QcMulti <KeyPress>          {qc::multiKey %K %A %s}
     bind QcMulti <Button-1>          {qc::multiClear}
     bind QcMulti <Button-2>          {qc::multiClear}
     bind QcMulti <Control-Button-1>  {qc::addCaretAt %x %y; break}
     bind QcMulti <<Paste>>           {if {[llength $::qc::mcur]} {qc::multiApply {qc::paste $::qc::ed}; break}}
 
-    bindtags $ed [list $ed QcMulti QcKeys QcEdit Text . all]
+    bindtags $ed [list $ed QcComp QcMulti QcKeys QcEdit Text . all]
     bindtags $con [list $con QcKeys Text . all]
     foreach e {.pw.ed.find.pat .pw.ed.find.rep} {
         bindtags $e [list $e QcKeys TEntry . all]
@@ -854,11 +894,13 @@ proc qc::openFolder {{dir ""}} {
     fillDir {} $cfg(folder)
     showSide 1
     treeReveal
+    if {$cfg(autocomp)} { projIndexStart }
 }
 
 proc qc::closeFolder {} {
     variable cfg
     set cfg(folder) ""
+    projIndexClear
     .side.t delete [.side.t children {}]
     showSide 0
 }
@@ -887,6 +929,7 @@ proc qc::refreshFolder {} {
     foreach i $sel { if {[$t exists $i]} { lappend keep $i } }
     $t selection set $keep
     if {$top ne "" && [$t exists $top]} { $t see $top }
+    if {$cfg(autocomp) || $::qc::PS(root) ne ""} { projIndexStart }
 }
 
 # Seleciona na árvore o arquivo aberto no editor (abrindo as pastas dele).
@@ -1227,17 +1270,23 @@ proc qc::compileLang {} {
     set H(through) [dict get $d defThroughBrace]
     set H(sub) [dict get $d sub]
     set H(wordHook) [hook wordTag]
+    set H(rainbow) [expr {[dict get $d rainbow] ? [llength $::qc::rainbow] : 0}]
     set subtags {}
     dict for {t rules} $H(sub) {
         foreach {cond st sre} $rules { lappend subtags $st }
     }
     lappend tags $H(defTag) number
     if {$H(capType) ne ""} { lappend tags $H(capType) }
+    set rbStyles {}
+    for {set k 0} {$k < $H(rainbow)} {incr k} {
+        lappend tags rb$k
+        dict set rbStyles rb$k [list [lindex $::qc::rainbow $k] {}]
+    }
     set tags [lsort -unique [concat $tags $subtags]]
     set H(tags) $tags
     set H(subtags) [lsort -unique $subtags]
 
-    set styles [dict merge $S [dict get $d styles]]
+    set styles [dict merge $S $rbStyles [dict get $d styles]]
     foreach t $tags {
         set opts {}
         if {[dict exists $styles $t]} {
@@ -1273,6 +1322,7 @@ proc qc::highlight {} {
     foreach t $H(tags) { set rng($t) {} }
     set nf $H(nfields)
     set defNext 0
+    set depth 0
     set m [regexp -all -inline -indices -- $H(re) $txt]
     for {set i 0} {$i < [llength $m]} {incr i $nf} {
         set tag ""
@@ -1313,6 +1363,17 @@ proc qc::highlight {} {
             }
         } elseif {!($tag eq "brace" && $H(through))} {
             set defNext 0
+        }
+        if {$tag eq "brace" && $H(rainbow)} {
+            # cor pelo nível: abertura usa o nível atual e desce um;
+            # fechamento sobe um e usa esse (sem par: fica "brace")
+            if {[string index $txt $a] in {( [ \{}} {
+                set tag rb[expr {$depth % $H(rainbow)}]
+                incr depth
+            } elseif {$depth > 0} {
+                incr depth -1
+                set tag rb[expr {$depth % $H(rainbow)}]
+            }
         }
         lappend rng($tag) [off2idx $starts $a] [off2idx $starts [expr {$z + 1}]]
         # sub-destaques (ex.: interpolação em strings)
@@ -1755,6 +1816,366 @@ proc qc::deleteFwd {} {
 }
 
 # ---------------------------------------------------------------------------
+# Autocompletar (Ctrl+Espaço, ou sozinho ao digitar 3 letras)
+# ---------------------------------------------------------------------------
+# Sugestões, nesta ordem: palavras do arquivo aberto, palavras-chave da
+# linguagem e, com uma pasta aberta, palavras dos arquivos da pasta com as
+# extensões da linguagem corrente. "Palavra" é o token "word" da linguagem.
+# O índice da pasta é montado aos poucos em segundo plano (sem travar a
+# interface), reaproveitando os arquivos que não mudaram (mtime), e é
+# refeito ao abrir/recarregar a pasta e ao salvar.
+
+namespace eval qc {
+    variable AC               ;# popup: on, start (índice do início da palavra)...
+    array set AC {on 0 start "" items {} after "" buf {} kw {} proj {}}
+    variable PX               ;# PX(<arquivo>) = {mtime ext palavras}
+    array set PX {}
+    variable PW               ;# PW(<ext>,<palavra>) = nº de arquivos com ela
+    array set PW {}
+    variable PL               ;# PL(<ext>) = palavras de PW com essa extensão (cache)
+    array set PL {}
+    variable PS               ;# varredura em andamento
+    array set PS {root "" after "" dirs {} files {} seen {} n 0 done 0}
+    variable acSkipDirs {node_modules target build dist out _build __pycache__ venv
+        project/target}
+    variable acMaxFiles 5000
+    variable acMaxSize 1000000
+}
+
+proc qc::acWordRe {} {
+    set tk [lget tokens]
+    if {[dict exists $tk word]} { return [dict get $tk word] }
+    return {[A-Za-z_][A-Za-z0-9_]*}
+}
+
+# Palavras distintas de um texto (3+ caracteres, com alguma letra, sem
+# começar por dígito).
+proc qc::acExtract {text {re ""}} {
+    if {$re eq ""} { set re [acWordRe] }
+    set n [expr {[lindex [regexp -about $re] 0] + 1}]
+    set all [regexp -all -inline -- $re $text]
+    set out {}
+    for {set i 0} {$i < [llength $all]} {incr i $n} {
+        set w [lindex $all $i]
+        if {[string length $w] >= 3 && ![string is digit [string index $w 0]]
+            && [regexp {[[:alpha:]]} $w]} {
+            lappend out $w
+        }
+    }
+    return [lsort -unique $out]
+}
+
+# Parte da palavra antes do cursor ("" se o cursor não está numa palavra).
+proc qc::acPrefix {} {
+    set before [$::qc::ed get "insert linestart" insert]
+    if {[regexp -- "(?:[acWordRe])\$" $before m]} { return $m }
+    return ""
+}
+
+# Junta as fontes de sugestão ao abrir o popup (o filtro reaproveita).
+proc qc::acPool {} {
+    variable AC
+    variable ed
+    variable H
+    variable cfg
+    variable PS
+    set re [acWordRe]
+    # o texto sem a palavra que está sendo digitada
+    set text "[$ed get 1.0 $AC(start)]\n[$ed get insert end]"
+    set AC(buf) [acExtract $text $re]
+    set AC(kw) [lsort [dict keys $H(words)]]
+    set AC(proj) {}
+    if {$cfg(folder) ne ""} {
+        if {$PS(root) ne $cfg(folder)} { projIndexStart }
+        foreach ext [lget ext] { lappend AC(proj) {*}[projWords $ext] }
+    }
+}
+
+# Filtra pelo prefixo atual e mostra/atualiza o popup; 0 = nada a sugerir.
+proc qc::acFilter {} {
+    variable AC
+    variable ed
+    set p [acPrefix]
+    if {[$ed index "insert -[string length $p]c"] ne $AC(start)} {
+        acHide
+        return 0
+    }
+    set g [string map {\\ \\\\ * \\* ? \\? [ \\[ ] \\]} $p]*
+    set exact {}
+    set rest {}
+    foreach src {buf kw proj} {
+        foreach w [lsearch -all -inline -glob -nocase $AC($src) $g] {
+            if {$w eq $p || [info exists seen($w)]} continue
+            set seen($w) 1
+            if {[string match $g $w]} { lappend exact $w } else { lappend rest $w }
+            if {[array size seen] >= 300} break
+        }
+    }
+    set items [concat $exact $rest]
+    if {![llength $items]} {
+        acHide
+        return 0
+    }
+    set AC(items) $items
+    acPlace
+    return 1
+}
+
+proc qc::acBuild {} {
+    variable C
+    set w .ac
+    toplevel $w -background #555555 -bd 0
+    wm withdraw $w
+    wm overrideredirect $w 1
+    catch {wm attributes $w -type popup_menu}
+    listbox $w.l -font QcMono -background $C(gutbg) -foreground $C(edfg) \
+        -selectbackground $C(sel) -selectforeground #ffffff -bd 0 \
+        -highlightthickness 0 -activestyle none -exportselection 0 -takefocus 0
+    pack $w.l -fill both -expand 1 -padx 1 -pady 1
+    bind $w.l <ButtonPress-1> {qc::acAccept [%W nearest %y]; break}
+    bind $w.l <MouseWheel> {%W yview scroll [expr {%D > 0 ? -3 : 3}] units; break}
+    catch {bind $w.l <Button-4> {%W yview scroll -3 units; break}}
+    catch {bind $w.l <Button-5> {%W yview scroll 3 units; break}}
+}
+
+proc qc::acPlace {} {
+    variable AC
+    variable ed
+    set bb [$ed bbox $AC(start)]
+    if {$bb eq ""} { set bb [$ed bbox insert] }
+    if {$bb eq ""} { acHide; return }
+    if {![winfo exists .ac]} { acBuild }
+    set l .ac.l
+    $l delete 0 end
+    $l insert end {*}$AC(items)
+    set wid 12
+    foreach i $AC(items) { if {[string length $i] > $wid} { set wid [string length $i] } }
+    $l configure -height [expr {min([llength $AC(items)], 10)}] -width [expr {min($wid + 1, 60)}]
+    $l selection clear 0 end
+    $l selection set 0
+    $l activate 0
+    $l see 0
+    lassign $bb x y w h
+    set rx [expr {[winfo rootx $ed] + $x - 3}]
+    set ry [expr {[winfo rooty $ed] + $y + $h + 2}]
+    update idletasks
+    set ph [winfo reqheight .ac]
+    set pw [winfo reqwidth .ac]
+    if {$ry + $ph > [winfo vrootheight .] } { set ry [expr {$ry - $h - $ph - 4}] }
+    if {$rx + $pw > [winfo vrootwidth .]} { set rx [expr {[winfo vrootwidth .] - $pw}] }
+    wm geometry .ac +$rx+$ry
+    if {!$AC(on)} {
+        wm deiconify .ac
+        raise .ac
+        set AC(on) 1
+    }
+}
+
+proc qc::acShow {manual} {
+    variable AC
+    variable ed
+    if {[llength $::qc::mcur]} return
+    set p [acPrefix]
+    if {$p eq "" && !$manual} return
+    set AC(start) [$ed index "insert -[string length $p]c"]
+    acPool
+    if {![acFilter] && $manual} { set ::qc::status "Nenhuma sugestão" }
+}
+
+proc qc::acHide {} {
+    variable AC
+    after cancel $AC(after)
+    if {$AC(on)} {
+        set AC(on) 0
+        wm withdraw .ac
+    }
+}
+
+proc qc::acMove {d} {
+    set l .ac.l
+    set n [$l size]
+    set i [expr {[$l curselection] + $d}]
+    if {abs($d) == 1} {
+        set i [expr {($i + $n) % $n}]                  ;# setas dão a volta
+    } else {
+        set i [expr {max(0, min($n - 1, $i))}]
+    }
+    $l selection clear 0 end
+    $l selection set $i
+    $l activate $i
+    $l see $i
+}
+
+proc qc::acAccept {{i ""}} {
+    variable AC
+    variable ed
+    if {$i eq ""} { set i [.ac.l curselection] }
+    set w [lindex $AC(items) $i]
+    acHide
+    focus $ed
+    if {$w eq "" || [$ed compare insert < $AC(start)]} return
+    atomic {
+        $ed delete $AC(start) insert
+        $ed insert insert $w
+    }
+    $ed see insert
+}
+
+# <KeyPress> do editor (bindtag QcComp, antes das demais).
+proc qc::acKey {K A s} {
+    variable AC
+    if {$AC(on) && !($s & 0x0C)} {
+        switch -- $K {
+            Up       { acMove -1; return -code break }
+            Down     { acMove 1;  return -code break }
+            Prior    { acMove -9; return -code break }
+            Next     { acMove 9;  return -code break }
+            Return - KP_Enter - Tab { acAccept; return -code break }
+            Escape   { acHide; return -code break }
+            Left - Right - Home - End { acHide }
+        }
+    } elseif {$AC(on) && ![regexp {_[LR]$} $K]} {
+        acHide                                          ;# Ctrl/Alt + tecla
+    }
+    # depois que a tecla for processada pelo editor: abre/atualiza o popup
+    after cancel $AC(after)
+    set AC(after) [after idle [list qc::acAfterKey $K $A $s]]
+}
+
+proc qc::acAfterKey {K A s} {
+    variable AC
+    variable cfg
+    if {[llength $::qc::mcur]} { acHide; return }
+    if {$s & 0x0C} return
+    set typed [expr {$A ne "" && [string is print $A]}]
+    if {$AC(on)} {
+        if {$typed || $K in {BackSpace Delete}} {
+            if {[acPrefix] eq ""} { acHide } else { acFilter }
+        }
+        return
+    }
+    if {!$cfg(autocomp) || !$typed} return
+    set p [acPrefix]
+    if {[string length $p] < 3 || [string index $p end] ne $A} return
+    if {[inLiteral "insert -[string length $p]c"]} return
+    acShow 0
+}
+
+# --- índice das palavras da pasta aberta -----------------------------------
+
+proc qc::projIndexStart {} {
+    variable PS
+    variable cfg
+    after cancel $PS(after)
+    if {$cfg(folder) eq "" || ![file isdirectory $cfg(folder)]} { projIndexClear; return }
+    if {$PS(root) ne $cfg(folder)} { projIndexClear }
+    set PS(root) $cfg(folder)
+    set PS(dirs) [list $cfg(folder)]
+    set PS(files) {}
+    set PS(seen) [dict create]
+    set PS(n) 0
+    set PS(done) 0
+    set PS(after) [after 50 qc::projIndexStep]
+}
+
+proc qc::projIndexClear {} {
+    variable PS
+    variable PX
+    variable PW
+    variable PL
+    after cancel $PS(after)
+    array set PS {root "" dirs {} files {} seen {} n 0 done 0}
+    array unset PX
+    array unset PW
+    array unset PL
+}
+
+# Um pedaço da varredura (~15 ms); reagenda a si mesmo até terminar.
+proc qc::projIndexStep {} {
+    variable PS
+    variable PX
+    variable acSkipDirs
+    variable acMaxFiles
+    set t0 [clock milliseconds]
+    while {[clock milliseconds] - $t0 < 15} {
+        if {[llength $PS(files)]} {
+            set PS(files) [lassign $PS(files) f]
+            dict set PS(seen) $f 1
+            projIndexFile $f
+        } elseif {[llength $PS(dirs)] && $PS(n) < $acMaxFiles} {
+            set PS(dirs) [lassign $PS(dirs) d]
+            foreach p [lsort [glob -nocomplain -directory $d -types d *]] {
+                set rel [string range $p [string length $PS(root)]+1 end]
+                if {[file tail $p] ni $acSkipDirs && $rel ni $acSkipDirs} {
+                    lappend PS(dirs) $p
+                }
+            }
+            foreach p [glob -nocomplain -directory $d -types f *] {
+                if {$PS(n) >= $acMaxFiles} break
+                if {[langForFileAny $p] ne ""} {
+                    lappend PS(files) $p
+                    incr PS(n)
+                }
+            }
+        } else {
+            # fim: esquece os arquivos que sumiram
+            foreach f [array names PX] {
+                if {![dict exists $PS(seen) $f]} { projForget $f }
+            }
+            set PS(seen) {}
+            set PS(done) 1
+            return
+        }
+    }
+    set PS(after) [after 5 qc::projIndexStep]
+}
+
+proc qc::projIndexFile {f} {
+    variable PX
+    variable PW
+    variable PL
+    variable acMaxSize
+    if {[catch {file mtime $f} mt] || [catch {file size $f} sz] || $sz > $acMaxSize} {
+        projForget $f
+        return
+    }
+    if {[info exists PX($f)] && [lindex $PX($f) 0] == $mt} return
+    set id [langForFileAny $f]
+    if {$id eq "" || [catch {readFile $f} data]} { projForget $f; return }
+    projForget $f
+    set ext [string tolower [file extension $f]]
+    set tk [lget tokens $id]
+    set re [expr {[dict exists $tk word] ? [dict get $tk word] : {[A-Za-z_][A-Za-z0-9_]*}}]
+    set words [acExtract $data $re]
+    set PX($f) [list $mt $ext $words]
+    foreach w $words { incr PW($ext,$w) }
+    unset -nocomplain PL($ext)
+}
+
+proc qc::projForget {f} {
+    variable PX
+    variable PW
+    variable PL
+    if {![info exists PX($f)]} return
+    lassign $PX($f) - ext words
+    foreach w $words {
+        if {[incr PW($ext,$w) -1] <= 0} { unset PW($ext,$w) }
+    }
+    unset PX($f)
+    unset -nocomplain PL($ext)
+}
+
+proc qc::projWords {ext} {
+    variable PW
+    variable PL
+    if {![info exists PL($ext)]} {
+        set n [string length $ext]
+        set PL($ext) [lsort [lmap k [array names PW $ext,*] {string range $k $n+1 end}]]
+    }
+    return $PL($ext)
+}
+
+# ---------------------------------------------------------------------------
 # Vários cursores (Ctrl+D / Alt+F3 / Ctrl+clique)
 # ---------------------------------------------------------------------------
 # O cursor principal é o próprio insert/sel do Text. Cada cursor extra é um
@@ -1948,7 +2369,11 @@ proc qc::moveCaret {k {shift 0}} {
     if {$hasSel && !$shift && $k eq "Left"} {
         set to sel.first
     } elseif {$hasSel && !$shift && $k eq "Right"} {
+        # linha(s) inteira(s) selecionada(s): fim da última linha, não o
+        # começo da seguinte
         set to sel.last
+        if {[$ed compare sel.last == "sel.last linestart"]
+            && [$ed compare sel.first < sel.last]} { set to "sel.last -1c" }
     } else {
         set to [dict get {
             Left "insert -1c" Right "insert +1c" Home "insert linestart"
@@ -1972,6 +2397,14 @@ proc qc::moveCaret {k {shift 0}} {
         }
     }
     $ed mark set insert $to
+}
+
+# ←/→ sem Shift com texto selecionado: cursor no início/fim da seleção.
+proc qc::selJump {k state} {
+    if {$state & 0x0D || ![llength [::qc::_edw tag ranges sel]]} { return 0 }
+    moveCaret $k
+    $::qc::ed see insert
+    return 1
 }
 
 # Ctrl+D: sem seleção, seleciona a palavra no cursor; com seleção, adiciona
@@ -2699,6 +3132,7 @@ proc qc::updateRecentMenu {} {
 proc qc::quit {} {
     if {![confirmDiscard]} return
     stop
+    termKill
     saveCfg
     catch {file delete -force [tmpDir]}
     exit
@@ -2727,6 +3161,8 @@ proc qc::clearConsole {} {
 }
 
 proc qc::setRunning {on} {
+    # terminal no lugar da saída: volta para a saída ao executar
+    if {$on && $::qc::cfg(terminal) && $::qc::cfg(termpos) eq "replace"} { showTerminal 0 }
     set s [expr {$on ? "disabled" : "!disabled"}]
     set ns [expr {$on ? "!disabled" : "disabled"}]
     .tb.run state $s
@@ -3067,6 +3503,236 @@ proc qc::stop {} {
 }
 
 # ---------------------------------------------------------------------------
+# Terminal embutido
+# ---------------------------------------------------------------------------
+# Um emulador de terminal (xterm por padrão) roda incorporado num frame
+# contêiner (requer X11). Fica ao lado da saída ou no lugar dela
+# (cfg(termpos) = side | replace). cfg(termcmd) troca o comando; nele
+# %W é o id da janela contêiner e %D a pasta inicial. Ex.:
+#   urxvt -embed %W -cd %D        st -w %W
+# O xterm é aberto bem maior que o painel e o Tk o reduz ao tamanho do
+# contêiner (uma janela embutida não cresce além do tamanho inicial).
+
+proc qc::buildTerminal {} {
+    variable C
+    set f [ttk::frame .pw.term]
+    ttk::frame $f.head -style Head.TFrame
+    ttk::label $f.head.l -text "Terminal" -style Head.TLabel -anchor w
+    ttk::button $f.head.o -text "Saída" -style Head.TButton -takefocus 0 \
+        -command {qc::showTerminal 0}
+    ttk::button $f.head.r -text ⟳ -style Head.TButton -takefocus 0 \
+        -command qc::termRestart
+    ttk::button $f.head.x -text ✕ -style Head.TButton -takefocus 0 \
+        -command {qc::showTerminal 0}
+    pack $f.head.x $f.head.r -side right
+    pack $f.head.l -side left -fill x -expand 1
+    grid $f.head -sticky ew
+    grid columnconfigure $f 0 -weight 1
+    grid rowconfigure $f 1 -weight 1
+    termContainer
+}
+
+# O Tk destrói o contêiner quando a janela embutida some (ex.: "exit" no
+# shell); por isso ele é recriado a cada novo terminal.
+proc qc::termContainer {} {
+    set c .pw.term.c
+    if {[winfo exists $c]} { return $c }
+    frame $c -container 1 -background $::qc::C(conbg) -bd 0 -highlightthickness 0
+    grid $c -row 1 -column 0 -sticky nsew
+    # o teclado vai para o terminal enquanto o ponteiro estiver sobre ele
+    # (é assim que o X entrega as teclas a uma janela embutida)
+    bind $c <Enter> {qc::termHover 1 %d}
+    bind $c <Leave> {qc::termHover 0 %d}
+    return $c
+}
+
+proc qc::termHover {in detail} {
+    variable T
+    if {$detail eq "NotifyInferior"} return
+    set c .pw.term.c
+    if {$in} {
+        if {[focus] ne $c} { set T(prevfocus) [focus] }
+        focus $c
+    } elseif {[focus] eq $c} {
+        set p [expr {[info exists T(prevfocus)] ? $T(prevfocus) : ""}]
+        if {$p eq "" || ![winfo exists $p] || ![winfo ismapped $p]} { set p $::qc::ed }
+        focus $p
+    }
+}
+
+proc qc::showTerminal {on} {
+    set ::qc::cfg(terminal) $on
+    applyTerminal
+}
+
+# Ctrl+' / Exibir > Terminal
+proc qc::toggleTerminal {} {
+    showTerminal [expr {!$::qc::cfg(terminal)}]
+}
+
+proc qc::applyTerminal {} {
+    variable cfg
+    if {$cfg(termpos) ni {side replace}} { set cfg(termpos) side }
+    set want .pw.co
+    if {$cfg(terminal)} {
+        set want [expr {$cfg(termpos) eq "replace" ? ".pw.term" : ".pw.co .pw.term"}]
+    }
+    if {[.pw.bot panes] ne $want} {
+        foreach p [.pw.bot panes] { .pw.bot forget $p }
+        foreach p $want { .pw.bot add $p -weight 1 }
+        if {[llength $want] > 1} {
+            update idletasks
+            catch {.pw.bot sashpos 0 [expr {[winfo width .pw] / 2}]}
+        }
+    }
+    if {$cfg(terminal) && ![termStart]} {
+        set cfg(terminal) 0
+        applyTerminal
+        return
+    }
+    if {$cfg(terminal)} {
+        pack forget .pw.co.head.t
+    } else {
+        pack .pw.co.head.t -side right -before .pw.co.head.l
+        if {[string match .pw.term* [focus]]} { focus $::qc::ed }
+    }
+    if {$cfg(termpos) eq "replace"} {
+        pack .pw.term.head.o -side right -after .pw.term.head.r
+    } else {
+        pack forget .pw.term.head.o
+    }
+}
+
+# Pasta inicial: a pasta aberta, a do arquivo atual ou a pasta pessoal.
+proc qc::termDir {} {
+    variable cfg
+    if {$cfg(folder) ne "" && [file isdirectory $cfg(folder)]} { return $cfg(folder) }
+    if {$::qc::file ne ""} { return [file dirname [file normalize $::qc::file]] }
+    return [homeDir]
+}
+
+proc qc::termDefaultCmd {wid} {
+    variable C
+    variable cfg
+    return [list xterm -into $wid +sb -geometry 400x150 -title qconsole \
+        -bg $C(conbg) -fg $C(confg) -fa [font actual QcMono -family] -fs $cfg(fontsize) \
+        -xrm "XTerm*cursorColor: $C(caret)" -xrm "XTerm*internalBorder: 4" \
+        -xrm "XTerm*borderWidth: 0" -xrm "XTerm*metaSendsEscape: true" \
+        -xrm "XTerm*selectToClipboard: true"]
+}
+
+proc qc::termStart {} {
+    variable T
+    variable cfg
+    if {[info exists T(chan)]} { return 1 }
+    if {[tk windowingsystem] ne "x11"} {
+        set ::qc::status "O terminal embutido requer X11"
+        return 0
+    }
+    set c [termContainer]
+    update idletasks
+    set wid [winfo id $c]
+    set dir [termDir]
+    if {[string trim $cfg(termcmd)] ne ""} {
+        set cmd [string map [list %W $wid %D [list $dir]] $cfg(termcmd)]
+        if {[catch {llength $cmd}]} {
+            set ::qc::status "Comando do terminal inválido: $cfg(termcmd)"
+            return 0
+        }
+    } elseif {[auto_execok xterm] eq ""} {
+        set ::qc::status "xterm não encontrado (Exibir > Comando do terminal…)"
+        return 0
+    } else {
+        set cmd [termDefaultCmd $wid]
+    }
+    set old [pwd]
+    catch {cd $dir}
+    set rc [catch {open |[list {*}$cmd 2>@1] r} ch]
+    cd $old
+    if {$rc} {
+        conAppend "Erro ao abrir o terminal: $ch\n" stderr
+        return 0
+    }
+    fconfigure $ch -blocking 0
+    fileevent $ch readable [list qc::termRead $ch]
+    set T(chan) $ch
+    set T(pid) [pid $ch]
+    return 1
+}
+
+# Mensagens do emulador vão para a saída; no fim (ex.: "exit" no shell)
+# o painel do terminal é fechado.
+proc qc::termRead {ch} {
+    variable T
+    set d [read $ch]
+    if {[string trim $d] ne ""} { conAppend "terminal: $d" stderr }
+    if {![eof $ch]} return
+    catch {close $ch}
+    if {[info exists T(chan)] && $T(chan) eq $ch} {
+        unset T(chan) T(pid)
+        showTerminal 0
+    }
+}
+
+proc qc::termKill {} {
+    variable T
+    if {![info exists T(chan)]} return
+    set ch $T(chan)
+    set pids $T(pid)
+    unset T(chan) T(pid)
+    fileevent $ch readable {}
+    catch {exec kill {*}$pids}
+    catch {close $ch}
+    if {[string match .pw.term* [focus]]} { focus $::qc::ed }
+    catch {destroy .pw.term.c}
+}
+
+proc qc::termRestart {} {
+    termKill
+    if {$::qc::cfg(terminal)} {
+        applyTerminal
+    } else {
+        showTerminal 1
+    }
+}
+
+proc qc::termDialog {} {
+    set w .termcfg
+    if {[winfo exists $w]} { raise $w; focus $w.f.e; return }
+    toplevel $w -background $::qc::C(ui)
+    wm title $w "Comando do terminal"
+    wm transient $w .
+    ttk::frame $w.f -padding 10
+    ttk::label $w.f.l -text "Comando (vazio = xterm com as cores do editor):"
+    ttk::entry $w.f.e -width 60 -textvariable ::qc::termTmp
+    ttk::label $w.f.h -style Status.TLabel -justify left -text \
+        "%W = id da janela onde o terminal é embutido, %D = pasta inicial\nex.: urxvt -embed %W -cd %D    ·    st -w %W"
+    ttk::frame $w.f.b
+    ttk::button $w.f.b.ok -text OK -command qc::termDialogApply
+    ttk::button $w.f.b.no -text Cancelar -command [list destroy $w]
+    pack $w.f.b.no $w.f.b.ok -side right -padx {6 0}
+    pack $w.f -fill both -expand 1
+    pack $w.f.l -anchor w
+    pack $w.f.e -fill x -pady 4
+    pack $w.f.h -anchor w
+    pack $w.f.b -fill x -pady {8 0}
+    bind $w <Return> qc::termDialogApply
+    bind $w <Escape> [list destroy $w]
+    set ::qc::termTmp $::qc::cfg(termcmd)
+    wm geometry $w +[expr {[winfo rootx .] + 200}]+[expr {[winfo rooty .] + 120}]
+    focus $w.f.e
+}
+
+proc qc::termDialogApply {} {
+    variable cfg
+    set new [string trim $::qc::termTmp]
+    destroy .termcfg
+    if {$new eq $cfg(termcmd)} return
+    set cfg(termcmd) $new
+    if {[info exists ::qc::T(chan)]} { termRestart }
+}
+
+# ---------------------------------------------------------------------------
 # Ajuda
 # ---------------------------------------------------------------------------
 
@@ -3083,6 +3749,7 @@ proc qc::showShortcuts {} {
         "Ctrl+Shift+S          Salvar como"
         "Ctrl+Shift+O          Abrir pasta"
         "Ctrl+B                Painel de arquivos"
+        "Ctrl+' / Ctrl+`       Terminal"
         "Ctrl+F4               Fechar arquivo"
         "Ctrl+Q                Sair"
         ""
@@ -3097,6 +3764,7 @@ proc qc::showShortcuts {} {
         "Esc                   Voltar a um cursor"
         "Ctrl+Shift+D          Duplicar linha"
         "Ctrl+/                Comentar linhas"
+        "Ctrl+Espaço           Completar palavra"
         "Tab / Shift+Tab       Indentar / Desindentar"
         "Ctrl+ + / - / 0       Tamanho da fonte"
     } \n]
@@ -3452,6 +4120,7 @@ qc::language scheme {
     indent   2
     dedentChars ""
     autoPairs {() [] \{\} \"\"}
+    rainbow  1
     tokens {
         comment  {;[^\n]*|#\|(?:[^|]|\|(?!#))*(?:\|#)?|#;}
         string   {"(?:[^"\\]|\\.)*"?}
@@ -3685,6 +4354,7 @@ proc qc::main {argv} {
     } else {
         newFile 1
     }
+    applyTerminal
     foreach e $::qc::loadErrors { conAppend "Erro ao carregar linguagem: $e\n" stderr }
     focus $::qc::ed
     updateCursor

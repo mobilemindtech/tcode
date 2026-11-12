@@ -18,6 +18,7 @@ pode ser interrompida a qualquer momento.
 
 - Destaque de sintaxe, números de linha, realce da linha atual e de pares de
   parênteses/chaves/colchetes
+- Parênteses coloridos por nível de aninhamento ("rainbow") no Scheme
 - Indentação automática por linguagem, Tab/Shift+Tab em blocos, comentar e
   descomentar linhas, duplicar linha
 - Fechamento automático de parênteses, colchetes, chaves e aspas; com texto
@@ -25,8 +26,21 @@ pode ser interrompida a qualquer momento.
 - Vários cursores no estilo Sublime: Ctrl+D seleciona a próxima ocorrência da
   seleção, Alt+F3 todas, Ctrl+clique ou Shift+Alt+↑/↓ adicionam cursores; o
   que for digitado vale para todos
+- Autocompletar (Ctrl+Espaço, ou sozinho ao digitar 3 letras): sugere palavras
+  do arquivo aberto, palavras-chave da linguagem e, com uma pasta aberta,
+  palavras dos arquivos da pasta da mesma linguagem (indexados em segundo
+  plano). ↑/↓ escolhem, Enter/Tab aceitam, Esc fecha; Editar > Sugerir ao
+  digitar liga/desliga o modo automático
 - Painel lateral com a árvore de arquivos de uma pasta (Arquivo > Abrir pasta,
   Ctrl+Shift+O; Ctrl+B mostra/esconde; `tcode pasta/` abre direto)
+- Terminal embutido (Exibir > Terminal, Ctrl+'): um xterm com as cores do
+  editor, aberto na pasta do projeto, ao lado da saída ou no lugar dela
+  (Exibir > Terminal ao lado / no lugar da saída). No modo "no lugar", a
+  saída volta à frente ao executar. O teclado vai para o terminal enquanto o
+  mouse estiver sobre ele; `exit` fecha o painel e ⟳ reinicia o shell.
+  Exibir > Comando do terminal… troca o emulador (`%W` = id da janela onde
+  ele é embutido, `%D` = pasta; ex.: `urxvt -embed %W -cd %D`, `st -w %W`).
+  Requer X11 (no Wayland funciona via XWayland)
 - Comandos de projeto: um arquivo `.qconsole` na raiz do projeto define o que
   o Ctrl+Alt+R executa (ex.: `sbt run`); Ctrl+R continua executando o arquivo
   e Ctrl+Shift+R a seleção (veja abaixo)
@@ -95,6 +109,7 @@ o interpretador, as opções passadas a ele e os argumentos do programa.
 | Ctrl+Alt+R | Executar o comando do projeto (`.qconsole`) |
 | Ctrl+Shift+O | Abrir pasta |
 | Ctrl+B | Mostrar/esconder o painel de arquivos |
+| Ctrl+' / Ctrl+` | Mostrar/esconder o terminal |
 | Ctrl+Break | Interromper execução |
 | Ctrl+W | Limpar saída |
 | Ctrl+E | Opções de execução |
@@ -113,6 +128,7 @@ o interpretador, as opções passadas a ele e os argumentos do programa.
 | Esc | Voltar a um cursor só |
 | Ctrl+Shift+D | Duplicar linha |
 | Ctrl+/ | Comentar/descomentar linhas |
+| Ctrl+Espaço | Completar palavra |
 | Tab / Shift+Tab | Indentar / Desindentar |
 | Ctrl++ / Ctrl+- / Ctrl+0 | Aumentar / diminuir / restaurar fonte |
 
@@ -192,7 +208,7 @@ Nos `args` do runner:
 
 Outras chaves aceitas: `capType`, `numberWord`, `sub`, `styles`, `commentRe`,
 `commentEnd`, `dedentChars`, `autoPairs`, `defThroughBrace`, `col0`, `infoRe`, `warnRe`,
-`grayInfo` (veja `langDefaults` no código).
+`grayInfo`, `rainbow` (1 = parênteses coloridos por nível) (veja `langDefaults` no código).
 
 Hooks opcionais podem ser definidos como procs em `::qc::lang::<id>::` —
 `init`, `wordTag`, `prepare`, `defaultExt`, `newlineIndent`, `stderrLine`,
