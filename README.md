@@ -18,7 +18,8 @@ pode ser interrompida a qualquer momento.
 
 - Destaque de sintaxe, números de linha, realce da linha atual e de pares de
   parênteses/chaves/colchetes
-- Parênteses coloridos por nível de aninhamento ("rainbow") no Scheme
+- Parênteses coloridos por nível de aninhamento ("rainbow") em Scheme, Tcl e
+  OCaml; os que ficam sem par (ou com o par trocado, ex.: `(]`) em vermelho
 - Indentação automática por linguagem, Tab/Shift+Tab em blocos, comentar e
   descomentar linhas, duplicar linha
 - Fechamento automático de parênteses, colchetes, chaves e aspas; com texto

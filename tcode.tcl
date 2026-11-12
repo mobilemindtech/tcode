@@ -1282,6 +1282,10 @@ proc qc::compileLang {} {
         lappend tags rb$k
         dict set rbStyles rb$k [list [lindex $::qc::rainbow $k] {}]
     }
+    if {$H(rainbow)} {
+        lappend tags rbbad
+        dict set rbStyles rbbad [list $::qc::C(stderr) B]
+    }
     set tags [lsort -unique [concat $tags $subtags]]
     set H(tags) $tags
     set H(subtags) [lsort -unique $subtags]
@@ -1322,7 +1326,7 @@ proc qc::highlight {} {
     foreach t $H(tags) { set rng($t) {} }
     set nf $H(nfields)
     set defNext 0
-    set depth 0
+    set open {}                    ;# rainbow: aberturas pendentes {fecho range}
     set m [regexp -all -inline -indices -- $H(re) $txt]
     for {set i 0} {$i < [llength $m]} {incr i $nf} {
         set tag ""
@@ -1365,15 +1369,22 @@ proc qc::highlight {} {
             set defNext 0
         }
         if {$tag eq "brace" && $H(rainbow)} {
-            # cor pelo nível: abertura usa o nível atual e desce um;
-            # fechamento sobe um e usa esse (sem par: fica "brace")
-            if {[string index $txt $a] in {( [ \{}} {
-                set tag rb[expr {$depth % $H(rainbow)}]
-                incr depth
-            } elseif {$depth > 0} {
-                incr depth -1
-                set tag rb[expr {$depth % $H(rainbow)}]
+            # cor pelo nível de aninhamento; a abertura só é colorida quando
+            # o fechamento correspondente aparece. Sem par (ou com o par
+            # trocado, ex.: "(]"): rbbad
+            set ch [string index $txt $a]
+            set r [list [off2idx $starts $a] [off2idx $starts [expr {$a + 1}]]]
+            set k [string first $ch "(\[\{"]
+            if {$k >= 0} {
+                lappend open [list [string index ")\]\}" $k] $r]
+            } elseif {[llength $open] && [lindex $open end 0] eq $ch} {
+                set rt rb[expr {([llength $open] - 1) % $H(rainbow)}]
+                lappend rng($rt) {*}[lindex $open end 1] {*}$r
+                set open [lrange $open 0 end-1]
+            } else {
+                lappend rng(rbbad) {*}$r
             }
+            continue
         }
         lappend rng($tag) [off2idx $starts $a] [off2idx $starts [expr {$z + 1}]]
         # sub-destaques (ex.: interpolação em strings)
@@ -1389,6 +1400,7 @@ proc qc::highlight {} {
             }
         }
     }
+    foreach o $open { lappend rng(rbbad) {*}[lindex $o 1] }
     foreach t $H(tags) {
         ::qc::_edw tag remove $t 1.0 end
         if {[llength $rng($t)]} { ::qc::_edw tag add $t {*}$rng($t) }
@@ -3795,6 +3807,7 @@ qc::language tcl {
     indentAfter {[\{\[]\s*$}
     dedentChars "\}"
     autoPairs {() [] \{\} \"\"}
+    rainbow  1
     tokens {
         comment {(?:^|;)[ \t]*(#[^\n]*)}
         escape  {\\.}
@@ -4207,6 +4220,7 @@ qc::language ocaml {
     indent     2
     autoPairs  {() [] \{\} \"\"}
     indentAfter {(?:=|->|\m(?:then|else|do|begin|struct|sig|object|in|with|try|fun|function)|[\{\[\(])\s*$}
+    rainbow  1
     tokens {
         comment   {\(\*(?:[^*]|\*(?!\)))*(?:\*\))?}
         directive {^[ \t]*(#[a-z_]+)}
