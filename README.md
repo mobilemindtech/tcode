@@ -20,6 +20,18 @@ pode ser interrompida a qualquer momento.
   parênteses/chaves/colchetes
 - Parênteses coloridos por nível de aninhamento ("rainbow") em Scheme, Tcl e
   OCaml; os que ficam sem par (ou com o par trocado, ex.: `(]`) em vermelho
+- Abas: cada arquivo aberto tem a sua (com desfazer, cursor e linguagem
+  próprios); ● marca alterações não salvas, o botão do meio fecha, o botão
+  direito tem Fechar / Fechar as outras / Copiar caminho. As abas são
+  reabertas na próxima vez
+- Ir para definição (F12, Alt+← volta): procura nas abas abertas e nos
+  arquivos da pasta aberta; com mais de uma definição, mostra um menu para
+  escolher. Ao parar o mouse sobre um nome, uma dica mostra a linha da
+  definição e os comentários logo acima dela (Exibir > Mostrar definição ao
+  passar o mouse). As definições vêm das palavras `defWords` da linguagem
+  (`proc`, `let rec`, `def`, `define`…) e das regexes `defPatterns`
+- Home vai ao primeiro caractere não branco da linha (de novo: coluna 0);
+  Shift+Home seleciona até lá
 - Indentação automática por linguagem, Tab/Shift+Tab em blocos, comentar e
   descomentar linhas, duplicar linha
 - Fechamento automático de parênteses, colchetes, chaves e aspas; com texto
@@ -116,12 +128,15 @@ o interpretador, as opções passadas a ele e os argumentos do programa.
 | Ctrl+E | Opções de execução |
 | Ctrl+N / Ctrl+O / Ctrl+S | Novo / Abrir / Salvar |
 | Ctrl+Shift+S | Salvar como |
-| Ctrl+F4 | Fechar arquivo |
+| Ctrl+F4 | Fechar aba |
+| Ctrl+Tab / Ctrl+PgDn | Próxima aba |
+| Ctrl+Shift+Tab / Ctrl+PgUp | Aba anterior |
 | Ctrl+Q | Sair |
 | Ctrl+Z / Ctrl+Y | Desfazer / Refazer |
 | Ctrl+F / Ctrl+H | Localizar / Substituir |
 | F3 / Shift+F3 | Próximo / Anterior |
 | Ctrl+L | Ir para linha |
+| F12 / Alt+← | Ir para definição / Voltar |
 | Ctrl+D | Selecionar palavra / próxima ocorrência (vários cursores) |
 | Alt+F3 | Selecionar todas as ocorrências |
 | Ctrl+clique | Adicionar cursor |

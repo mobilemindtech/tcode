@@ -44,7 +44,9 @@
 # Outras chaves: capType, numberWord, sub, styles, commentRe, dedentChars,
 # autoPairs (pares fechados automaticamente, ex.: {() [] \"\"}),
 # defThroughBrace, col0, infoRe, warnRe, grayInfo, rainbow (1 = parênteses
-# coloridos por nível de aninhamento; ver qc::rainbow) (ver langDefaults).
+# coloridos por nível de aninhamento; ver qc::rainbow), defPatterns (regexes
+# extras de definição para o F12, com UM grupo = o nome; as palavras de
+# defWords já geram uma) (ver langDefaults).
 # Hooks opcionais: procs em ::qc::lang::<id>:: -- init, wordTag, prepare,
 # defaultExt, newlineIndent, stderrLine, findExe (ver as embutidas).
 # Tags de cor disponíveis: veja qc::S; "styles" define novas.
@@ -96,7 +98,7 @@ namespace eval qc {
     array set cfg {
         fontsize 12 wrap 0 autoclear 1 recent {} geometry 1100x800
         lastdir "" lang "" folder "" sidebar 0 sidew 240 autocomp 1
-        terminal 0 termpos side termcmd "" tabs {} tabcur ""
+        terminal 0 termpos side termcmd "" tabs {} tabcur "" hoverdef 1
     }
     variable T                ;# terminal embutido: T(chan), T(pid), T(shown)
     array set T {}
@@ -129,7 +131,7 @@ namespace eval qc {
         defWords {} defTag defname defThroughBrace 0 capType "" numberWord ""
         sub {} styles {} indentAfter {[\{\[\(]\s*$} dedentChars "\}\)\]"
         runners {} errPatterns {} col0 0 infoRe "" warnRe "" grayInfo 0
-        templates {} autoPairs {() [] \{\} \"\" ''} rainbow 0
+        templates {} autoPairs {() [] \{\} \"\" ''} rainbow 0 defPatterns {}
     }
     namespace eval lang {}
 }
@@ -537,6 +539,8 @@ proc qc::buildMenus {} {
     $m add command -label "Localizar próximo"  -accelerator F3           -command {qc::findNext 1}
     $m add command -label "Localizar anterior" -accelerator Shift+F3     -command {qc::findNext 0}
     $m add command -label "Ir para linha…"     -accelerator Ctrl+L       -command qc::gotoDialog
+    $m add command -label "Ir para definição"  -accelerator F12          -command qc::goToDefinition
+    $m add command -label "Voltar"             -accelerator Alt+←        -command qc::navBack
 
     set m [menu .mb.lang -tearoff 0]
     .mb add cascade -label Linguagem -menu $m
@@ -567,6 +571,8 @@ proc qc::buildMenus {} {
     $m add command -label "Fonte padrão"       -accelerator Ctrl+0       -command {qc::zoom 0}
     $m add separator
     $m add checkbutton -label "Quebra de linha" -variable ::qc::cfg(wrap) -command qc::applyWrap
+    $m add checkbutton -label "Mostrar definição ao passar o mouse" -variable ::qc::cfg(hoverdef) \
+        -command qc::tipHide
     $m add checkbutton -label "Painel de arquivos" -accelerator Ctrl+B \
         -variable ::qc::cfg(sidebar) -command qc::applySide
     $m add separator
@@ -585,6 +591,8 @@ proc qc::buildMenus {} {
 
     # menus de contexto
     set m [menu .edpop -tearoff 0]
+    $m add command -label "Ir para definição" -accelerator F12 -command qc::goToDefinition
+    $m add separator
     $m add command -label "Recortar"         -command {event generate $::qc::ed <<Cut>>}
     $m add command -label "Copiar"           -command {event generate $::qc::ed <<Copy>>}
     $m add command -label "Colar"            -command {qc::paste $::qc::ed}
@@ -714,6 +722,8 @@ proc qc::setupBindings {} {
         <Shift-F3>          {qc::findNext 0}
         <Alt-F3>            {focus $::qc::ed; qc::selectAllOcc}
         <Control-l>         qc::gotoDialog
+        <F12>               qc::goToDefinition
+        <Alt-Left>          qc::navBack
         <Control-plus>      {qc::zoom 1}
         <Control-equal>     {qc::zoom 1}
         <Control-KP_Add>    {qc::zoom 1}
@@ -749,7 +759,7 @@ proc qc::setupBindings {} {
     bind QcEdit <Control-slash> {qc::toggleComment; break}
     bind QcEdit <<Paste>>       {qc::paste %W; break}
     bind QcEdit <Control-MouseWheel> {qc::zoom [expr {%D > 0 ? 1 : -1}]; break}
-    bind QcEdit <Button-3>      {focus %W; tk_popup .edpop %X %Y; break}
+    bind QcEdit <Button-3>      {qc::edPopup %W %x %y %X %Y; break}
     bind QcEdit <<Undo>>        {qc::editCmd undo; break}
     bind QcEdit <<Redo>>        {qc::editCmd redo; break}
 
@@ -763,6 +773,13 @@ proc qc::setupBindings {} {
     bind QcComp <MouseWheel>      {qc::acHide}
     bind QcComp <FocusOut>        {qc::acHide}
     bind QcComp <Configure>       {qc::acHide}
+
+    # dica com a definição da palavra sob o mouse
+    bind QcHover <Motion>     {qc::hoverSched %W %x %y}
+    bind QcHover <Leave>      qc::tipHide
+    bind QcHover <KeyPress>   qc::tipHide
+    bind QcHover <Button>     qc::tipHide
+    bind QcHover <MouseWheel> qc::tipHide
 
     bind QcMulti <KeyPress>          {qc::multiKey %K %A %s}
     bind QcMulti <Button-1>          {qc::multiClear}
@@ -2132,6 +2149,8 @@ proc qc::projIndexClear {} {
     variable PL
     after cancel $PS(after)
     array set PS {root "" dirs {} files {} seen {} n 0 done 0}
+    array unset ::qc::DX
+    array unset ::qc::DN
     array unset PX
     array unset PW
     array unset PL
@@ -2195,6 +2214,7 @@ proc qc::projIndexFile {f} {
     set re [expr {[dict exists $tk word] ? [dict get $tk word] : {[A-Za-z_][A-Za-z0-9_]*}}]
     set words [acExtract $data $re]
     set PX($f) [list $mt $ext $words]
+    defIndexFile $f $id $data
     foreach w $words { incr PW($ext,$w) }
     unset -nocomplain PL($ext)
 }
@@ -2209,6 +2229,7 @@ proc qc::projForget {f} {
         if {[incr PW($ext,$w) -1] <= 0} { unset PW($ext,$w) }
     }
     unset PX($f)
+    defForget $f
     unset -nocomplain PL($ext)
 }
 
@@ -2220,6 +2241,381 @@ proc qc::projWords {ext} {
         set PL($ext) [lsort [lmap k [array names PW $ext,*] {string range $k $n+1 end}]]
     }
     return $PL($ext)
+}
+
+# ---------------------------------------------------------------------------
+# Ir para definição (F12) e dica ao passar o mouse
+# ---------------------------------------------------------------------------
+# Definições: palavras de defWords seguidas de um nome (ex.: "proc nome",
+# "let rec nome", "(define (nome") e as regexes de defPatterns. Os arquivos
+# da pasta entram no índice junto com a varredura do autocompletar
+# (DX(<arquivo>) = definições, DN(<nome>) = arquivos que o definem); as abas
+# abertas são lidas na hora, porque podem ter alterações não salvas.
+# Cada definição: {nome linha coluna textoDaLinha comentáriosAcima}.
+
+namespace eval qc {
+    variable DX
+    variable DN
+    variable DR               ;# DR(<lang>) = regexes de definição compiladas
+    array set DX {}
+    array set DN {}
+    array set DR {}
+    variable navStack {}      ;# posições para o Alt+←
+    variable tipAfter ""
+    variable tipKey ""
+}
+
+proc qc::defRegexes {id} {
+    variable DR
+    if {[info exists DR($id)]} { return $DR($id) }
+    set tk [lget tokens $id]
+    set wre [expr {[dict exists $tk word] ? [dict get $tk word] : {[A-Za-z_][A-Za-z0-9_]*}}]
+    set res {}
+    set dw [lget defWords $id]
+    if {[llength $dw]} {
+        set alt [join [lmap w $dw {reQuote $w}] |]
+        # "let rec x", "module type S", "type 'a t", "(define (f"
+        lappend res "(?:^|\[^\\w-\])(?:$alt)(?:\[ \\t\]+(?:$alt))*\\s+(?:'\\w+\[ \\t\]+)?\\(?($wre)"
+    }
+    lappend res {*}[lget defPatterns $id]
+    set out {}
+    foreach re $res {
+        if {[catch {regexp -about $re} ab] || [lindex $ab 0] < 1} continue
+        lappend out $re [expr {[lindex $ab 0] + 1}]
+    }
+    set kw {}
+    dict for {tag list} [lget words $id] { foreach w $list { dict set kw $w 1 } }
+    set p [regsub {(.)\1+$} [lget comment $id] {\1}]
+    set DR($id) [list $out $kw $p [lget commentEnd $id]]
+    return $DR($id)
+}
+
+# Nome usado no índice: sem o qualificador (::ns::proc -> proc).
+proc qc::defKey {name} {
+    return [regsub {^.*::} $name {}]
+}
+
+# Lista de definições de um texto.
+proc qc::defsIn {text id} {
+    lassign [defRegexes $id] res kw cpre cend
+    if {![llength $res]} { return {} }
+    set lines [split $text \n]
+    set starts {}
+    set o 0
+    foreach ln $lines {
+        lappend starts $o
+        incr o [expr {[string length $ln] + 1}]
+    }
+    set out {}
+    set seen {}
+    foreach {re step} $res {
+        set m [regexp -all -inline -indices -line -- $re $text]
+        for {set i 0} {$i < [llength $m]} {incr i $step} {
+            lassign [lindex $m $i+1] a z
+            if {$a < 0} continue
+            set key [defKey [string range $text $a $z]]
+            if {$key eq "" || [dict exists $kw $key] || [dict exists $seen $a]} continue
+            dict set seen $a 1
+            set L [lsearch -bisect -integer $starts $a]
+            set col [expr {$a - [lindex $starts $L]}]
+            lappend out [list $key [expr {$L + 1}] $col \
+                [string trim [lindex $lines $L]] [defDoc $lines $L $cpre $cend]]
+        }
+    }
+    return $out
+}
+
+# Comentários logo acima da linha L (índice 0): linhas com o prefixo de
+# comentário ou um bloco terminado em */ ou commentEnd.
+proc qc::defDoc {lines L cpre cend} {
+    set doc {}
+    set k [expr {$L - 1}]
+    set t [string trim [lindex $lines $k]]
+    set ends [list */]
+    if {$cend ne ""} { lappend ends $cend }
+    set block 0
+    foreach e $ends {
+        if {$t ne "" && [string match "*$e" $t]} { set block 1 }
+    }
+    while {$k >= 0 && [llength $doc] < 8} {
+        set t [string trim [lindex $lines $k]]
+        if {$block} {
+            set doc [linsert $doc 0 $t]
+            if {[string match "/\\**" $t] || ($cend ne "" && [string first $cpre $t] == 0)} break
+        } elseif {$cpre ne "" && [string first $cpre $t] == 0} {
+            set doc [linsert $doc 0 $t]
+        } else {
+            break
+        }
+        incr k -1
+    }
+    return $doc
+}
+
+proc qc::defIndexFile {f id data} {
+    variable DX
+    variable DN
+    defForget $f
+    set defs [defsIn $data $id]
+    if {![llength $defs]} return
+    set DX($f) $defs
+    foreach d $defs { dict set DN([lindex $d 0]) $f 1 }
+}
+
+proc qc::defForget {f} {
+    variable DX
+    variable DN
+    if {![info exists DX($f)]} return
+    foreach d $DX($f) {
+        set k [lindex $d 0]
+        if {[info exists DN($k)]} {
+            dict unset DN($k) $f
+            if {![dict size $DN($k)]} { unset DN($k) }
+        }
+    }
+    unset DX($f)
+}
+
+# Definições de name: aba ativa, outras abas da mesma linguagem e arquivos
+# da pasta. Cada item: {arquivo editor nome linha coluna texto doc}
+# (editor = "" para arquivo que não está aberto).
+proc qc::findDefs {name} {
+    variable DX
+    variable DN
+    variable PS
+    variable cfg
+    variable TB
+    set id $::qc::lang
+    set key [defKey $name]
+    set out {}
+    set open {}
+    set ws [list $::qc::ed]
+    foreach w $::qc::tabs { if {$w ne $::qc::ed} { lappend ws $w } }
+    foreach w $ws {
+        if {$TB($w,file) ne ""} { dict set open $TB($w,file) 1 }
+        if {$TB($w,lang) ne $id} continue
+        foreach d [defsIn [$w get 1.0 end-1c] $id] {
+            if {[lindex $d 0] eq $key} { lappend out [list $TB($w,file) $w {*}$d] }
+        }
+    }
+    if {$cfg(folder) ne "" && $PS(root) ne $cfg(folder)} { projIndexStart }
+    if {[info exists DN($key)]} {
+        set exts [lget ext]
+        foreach f [lsort [dict keys $DN($key)]] {
+            if {[dict exists $open $f]
+                || [string tolower [file extension $f]] ni $exts} continue
+            foreach d $DX($f) {
+                if {[lindex $d 0] eq $key} { lappend out [list $f "" {*}$d] }
+            }
+        }
+    }
+    return $out
+}
+
+# Palavra (pela regex "word" da linguagem) na posição idx do editor:
+# {palavra início fim}. after=1 aceita o cursor logo depois da palavra.
+proc qc::wordAt {idx {after 1}} {
+    variable ed
+    lassign [split [$ed index $idx] .] l c
+    set line [$ed get $l.0 "$l.0 lineend"]
+    foreach r [regexp -all -inline -indices -- [acWordRe] $line] {
+        lassign $r a z
+        if {$c >= $a && ($c <= $z || ($after && $c == $z + 1))} {
+            return [list [string range $line $a $z] $l.$a $l.[expr {$z + 1}]]
+        }
+    }
+    return {}
+}
+
+# Tira da lista a própria definição em que o cursor/mouse está.
+proc qc::defsElsewhere {defs at} {
+    lassign [split $at .] l c
+    set out {}
+    foreach d $defs {
+        lassign $d f w - dl dc
+        if {$w eq $::qc::ed && $dl == $l && $dc == $c} continue
+        lappend out $d
+    }
+    return $out
+}
+
+proc qc::defLabel {d} {
+    lassign $d f w name line
+    return "[expr {$f eq "" ? "Sem título" : [file tail $f]}]:$line"
+}
+
+proc qc::goToDefinition {} {
+    variable ed
+    focus $ed
+    set wd [wordAt insert]
+    if {![llength $wd]} {
+        set ::qc::status "Nenhum nome no cursor"
+        return
+    }
+    lassign $wd name a
+    set all [findDefs $name]
+    set defs [defsElsewhere $all $a]
+    if {![llength $defs]} {
+        set ::qc::status [expr {[llength $all] ? "Já está na definição de $name"
+            : "Definição de $name não encontrada"}]
+        return
+    }
+    if {[llength $defs] == 1} {
+        gotoDef [lindex $defs 0]
+        return
+    }
+    # várias: menu para escolher, na posição do cursor
+    set m .defpop
+    destroy $m
+    menu $m -tearoff 0
+    foreach d $defs {
+        set txt [lindex $d 5]
+        if {[string length $txt] > 70} { set txt "[string range $txt 0 68]…" }
+        $m add command -label "[defLabel $d]   $txt" -command [list qc::gotoDef $d]
+    }
+    set bb [$ed bbox insert]
+    if {![llength $bb]} { set bb {0 0 0 0} }
+    tk_popup $m [expr {[winfo rootx $ed] + [lindex $bb 0]}] \
+        [expr {[winfo rooty $ed] + [lindex $bb 1] + [lindex $bb 3]}]
+}
+
+proc qc::gotoDef {d} {
+    lassign $d f w name line col
+    navPush
+    if {$w ne "" && [winfo exists $w]} {
+        activateTab $w
+    } else {
+        openFile $f
+        if {$::qc::file ne $f} return
+    }
+    gotoLine $line $col
+    set ::qc::status "$name — [defLabel $d]   (Alt+← volta)"
+}
+
+proc qc::navPush {} {
+    variable navStack
+    variable ed
+    lappend navStack [list $::qc::file $ed [$ed index insert]]
+    set navStack [lrange $navStack end-49 end]
+}
+
+# Alt+←: volta para onde estava antes do último F12.
+proc qc::navBack {} {
+    variable navStack
+    if {![llength $navStack]} {
+        set ::qc::status "Nada para voltar"
+        return
+    }
+    lassign [lindex $navStack end] f w idx
+    set navStack [lrange $navStack 0 end-1]
+    if {[winfo exists $w] && $w in $::qc::tabs} {
+        activateTab $w
+    } elseif {$f ne ""} {
+        openFile $f
+        if {$::qc::file ne $f} return
+    } else {
+        return
+    }
+    $::qc::ed mark set insert $idx
+    $::qc::ed tag remove sel 1.0 end
+    $::qc::ed see insert
+    focus $::qc::ed
+}
+
+# Botão direito: leva o cursor ao clique (se não for dentro da seleção).
+proc qc::edPopup {w x y X Y} {
+    focus $w
+    set i [$w index @$x,$y]
+    set sel [$w tag ranges sel]
+    if {![llength $sel] || [$w compare $i < sel.first] || [$w compare $i > sel.last]} {
+        $w tag remove sel 1.0 end
+        $w mark set insert $i
+    }
+    tk_popup .edpop $X $Y
+}
+
+# --- dica -----------------------------------------------------------------
+
+proc qc::tipHide {} {
+    variable tipAfter
+    variable tipKey ""
+    after cancel $tipAfter
+    catch {destroy .tip}
+}
+
+proc qc::hoverSched {w x y} {
+    variable tipAfter
+    variable tipKey
+    if {!$::qc::cfg(hoverdef) || $w ne $::qc::ed} return
+    after cancel $tipAfter
+    set wd [wordAt @$x,$y 0]
+    set key [lrange $wd 0 1]
+    if {$key eq $tipKey && [winfo exists .tip]} return
+    catch {destroy .tip}
+    set tipKey ""
+    if {![llength $wd]} return
+    # fora do texto (depois do fim da linha) o índice "@x,y" cai no fim
+    set bb [$w bbox [lindex $wd 1]]
+    if {![llength $bb] || $y < [lindex $bb 1] || $y > [lindex $bb 1] + [lindex $bb 3]} return
+    set tipAfter [after 450 [list qc::tipShow $w $wd $x $y]]
+}
+
+proc qc::tipShow {w wd x y} {
+    variable C
+    variable tipKey
+    if {$w ne $::qc::ed || ![winfo exists $w]} return
+    lassign $wd name a
+    if {[inLiteral $a]} return
+    foreach t [$w tag names $a] { if {$t in {keyword var}} return }
+    set defs [defsElsewhere [findDefs $name] $a]
+    if {![llength $defs]} return
+    set tipKey [lrange $wd 0 1]
+
+    set t .tip
+    toplevel $t -background #555555
+    wm withdraw $t
+    wm overrideredirect $t 1
+    catch {wm attributes $t -type tooltip}
+    text $t.t -background $C(ui) -foreground $C(edfg) -font QcMono -bd 0 \
+        -highlightthickness 0 -padx 8 -pady 6 -wrap none -cursor arrow
+    pack $t.t -padx 1 -pady 1
+    $t.t tag configure loc -foreground #8a8a8a -font TkDefaultFont
+    $t.t tag configure doc -foreground [lindex [dict get $::qc::S comment] 0] -font QcMonoI
+    $t.t tag configure sig -foreground $C(edfg)
+    set n 0
+    foreach d $defs {
+        if {[incr n] > 3} break
+        lassign $d f - - line - sig doc
+        if {$n > 1} { $t.t insert end \n }
+        $t.t insert end "[defLabel $d]\n" loc
+        foreach dl $doc { $t.t insert end "$dl\n" doc }
+        if {[string length $sig] > 120} { set sig "[string range $sig 0 118]…" }
+        $t.t insert end "$sig\n" sig
+    }
+    if {[llength $defs] > 3} {
+        $t.t insert end "+[expr {[llength $defs] - 3}] outras (F12 para escolher)\n" loc
+    }
+    $t.t delete end-1c
+    set wmax 10
+    foreach ln [split [$t.t get 1.0 end-1c] \n] {
+        set wmax [expr {max($wmax, min(120, [string length $ln]))}]
+    }
+    $t.t configure -width $wmax -height [lindex [split [$t.t index end-1c] .] 0] \
+        -state disabled
+    # abaixo da linha do mouse; acima, se não couber na tela
+    set bb [$w bbox $a]
+    set rx [expr {[winfo rootx $w] + $x + 4}]
+    set ry [expr {[winfo rooty $w] + [lindex $bb 1] + [lindex $bb 3] + 4}]
+    update idletasks
+    set tw [winfo reqwidth $t]
+    set th [winfo reqheight $t]
+    set sw [winfo screenwidth $t]
+    set sh [winfo screenheight $t]
+    if {$rx + $tw > $sw} { set rx [expr {max(0, $sw - $tw)}] }
+    if {$ry + $th > $sh} { set ry [expr {[winfo rooty $w] + [lindex $bb 1] - $th - 4}] }
+    wm geometry $t +$rx+$ry
+    wm deiconify $t
+    raise $t
 }
 
 # ---------------------------------------------------------------------------
@@ -3027,7 +3423,7 @@ proc qc::newEditor {} {
         -yscrollcommand [list qc::edYscroll $w] -xscrollcommand [list qc::edXscroll $w]
     setupEdTags $w
     installProxy $w
-    bindtags $w [list $w QcComp QcMulti QcKeys QcEdit Text . all]
+    bindtags $w [list $w QcHover QcComp QcMulti QcKeys QcEdit Text . all]
     bind $w <Configure> qc::schedGutter
     bind $w <<Modified>> [list qc::onModified $w]
     array set TB [list $w,file "" $w,lang ""]
@@ -3049,6 +3445,7 @@ proc qc::activateTab {w} {
         focus $w
         return
     }
+    tipHide
     if {$ed ne "" && [winfo exists $ed]} {
         multiClear
         acHide
@@ -4086,6 +4483,7 @@ proc qc::showShortcuts {} {
         "Ctrl+F / Ctrl+H       Localizar / Substituir"
         "F3 / Shift+F3         Próximo / Anterior"
         "Ctrl+L                Ir para linha"
+        "F12 / Alt+←           Ir para definição / Voltar"
         "Ctrl+D                Selecionar próxima ocorrência"
         "Alt+F3                Selecionar todas as ocorrências"
         "Ctrl+Clique           Adicionar cursor"
@@ -4634,6 +5032,7 @@ qc::language shell {
         }
     }
     defWords {function}
+    defPatterns {{^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(\)}}
     sub      { string {{^"} var {\$(?:\{[^\}\n]*\}|[A-Za-z_][A-Za-z0-9_]*|[0-9#?$!@*-])}} }
     runners {
         {name bash label bash exe {bash} args {%O %F %A} optsHint "-x   -e   -u   -o pipefail"}
