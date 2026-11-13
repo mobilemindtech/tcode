@@ -47,7 +47,8 @@
 # coloridos por nível de aninhamento; ver qc::rainbow), defPatterns (regexes
 # extras de definição para o F12, com UM grupo = o nome; as palavras de
 # defWords já geram uma), docString (1 = string logo após a assinatura é
-# documentação, como em Scheme) (ver langDefaults).
+# documentação, como em Scheme), pretty (palavra -> símbolo exibido no lugar
+# dela, ex.: {define λ}; o texto não muda) (ver langDefaults).
 # Hooks opcionais: procs em ::qc::lang::<id>:: -- init, wordTag, prepare,
 # defaultExt, newlineIndent, stderrLine, findExe, apiSources, apiParse,
 # defQual (ver as embutidas; as três últimas montam o índice de biblioteca
@@ -102,6 +103,7 @@ namespace eval qc {
         fontsize 12 wrap 0 autoclear 1 recent {} geometry 1100x800
         lastdir "" lang "" folder "" sidebar 0 sidew 240 autocomp 1
         terminal 0 termpos side termcmd "" tabs {} tabcur "" hoverdef 1
+        pretty 1
     }
     variable T                ;# terminal embutido: T(chan), T(pid), T(shown)
     array set T {}
@@ -135,7 +137,7 @@ namespace eval qc {
         sub {} styles {} indentAfter {[\{\[\(]\s*$} dedentChars "\}\)\]"
         runners {} errPatterns {} col0 0 infoRe "" warnRe "" grayInfo 0
         templates {} autoPairs {() [] \{\} \"\" ''} rainbow 0 defPatterns {}
-        docString 0
+        docString 0 pretty {}
     }
     namespace eval lang {}
 }
@@ -578,6 +580,8 @@ proc qc::buildMenus {} {
     $m add checkbutton -label "Quebra de linha" -variable ::qc::cfg(wrap) -command qc::applyWrap
     $m add checkbutton -label "Mostrar definição ao passar o mouse" -variable ::qc::cfg(hoverdef) \
         -command qc::tipHide
+    $m add checkbutton -label "Símbolos no lugar de palavras (define → λ)" \
+        -variable ::qc::cfg(pretty) -command qc::highlight
     $m add checkbutton -label "Painel de arquivos" -accelerator Ctrl+B \
         -variable ::qc::cfg(sidebar) -command qc::applySide
     $m add separator
@@ -663,6 +667,7 @@ proc qc::setupEdTags {ed} {
     $ed tag configure bbad      -background $C(bbad)
     $ed tag configure msel      -background $C(sel)
     $ed tag configure deflink   -underline 1
+    $ed tag configure pel       -elide 1
     $ed tag lower curline
 }
 
@@ -1324,6 +1329,7 @@ proc qc::compileLang {} {
     set H(capType) [dict get $d capType]
     set H(numRe) [dict get $d numberWord]
     set H(through) [dict get $d defThroughBrace]
+    set H(pretty) [dict get $d pretty]
     set H(sub) [dict get $d sub]
     set H(wordHook) [hook wordTag]
     set H(rainbow) [expr {[dict get $d rainbow] ? [llength $::qc::rainbow] : 0}]
@@ -1384,6 +1390,9 @@ proc qc::highlight {} {
     set nf $H(nfields)
     set defNext 0
     set open {}                    ;# rainbow: aberturas pendentes {fecho range}
+    set pretty [expr {$::qc::cfg(pretty) && [dict size $H(pretty)]}]
+    set pw {}                      ;# palavras exibidas como símbolo
+    set pe {}                      ;# ...e o trecho oculto de cada uma
     set m [regexp -all -inline -indices -- $H(re) $txt]
     for {set i 0} {$i < [llength $m]} {incr i $nf} {
         set tag ""
@@ -1402,6 +1411,10 @@ proc qc::highlight {} {
         lassign $r a z
         if {$tag eq "word"} {
             set word [string range $txt $a $z]
+            if {$pretty && [dict exists $H(pretty) $word]} {
+                lappend pw [off2idx $starts $a] [off2idx $starts [expr {$z + 1}]]
+                lappend pe [off2idx $starts [expr {$a + 1}]] [off2idx $starts [expr {$z + 1}]]
+            }
             set tag ""
             set fromTable 0
             if {$H(numRe) ne "" && [regexp -- $H(numRe) $word]} {
@@ -1462,6 +1475,15 @@ proc qc::highlight {} {
         ::qc::_edw tag remove $t 1.0 end
         if {[llength $rng($t)]} { ::qc::_edw tag add $t {*}$rng($t) }
     }
+    ::qc::_edw tag remove pword 1.0 end
+    ::qc::_edw tag remove pel 1.0 end
+    if {[llength $pw]} {
+        ::qc::_edw tag add pword {*}$pw
+        ::qc::_edw tag add pel {*}$pe
+    }
+    unset -nocomplain ::qc::TB($ed,praw)
+    prettyCursor
+    schedGutter
     if {[winfo ismapped .pw.ed.find]} { markAll }
 }
 
@@ -1485,6 +1507,7 @@ proc qc::edYscroll {w args} {
 proc qc::edXscroll {w args} {
     if {$w ne $::qc::ed} return
     .pw.ed.sx set {*}$args
+    schedGutter
     if {[llength $::qc::mcur]} { after idle qc::drawCarets }
 }
 
@@ -1522,6 +1545,7 @@ proc qc::drawGutter {} {
             -font QcMono -fill [expr {$n == $cur ? $C(gutcur) : $C(gutfg)}]
         set i [$ed index "$i +1 line"]
     }
+    drawPretty
 }
 
 proc qc::gutterClick {y} {
@@ -1556,8 +1580,107 @@ proc qc::updateCursor {} {
     ::qc::_edw tag remove curline 1.0 end
     ::qc::_edw tag add curline "insert linestart" "insert lineend +1c"
     matchBrackets
+    prettyCursor
     schedGutter
     drawCarets
+}
+
+# --- símbolos no lugar de palavras (chave "pretty" da linguagem) -----------
+# A palavra continua no texto: o 1º caractere fica sob um label com o símbolo
+# e o resto recebe a tag pel (oculta). A palavra sob o cursor aparece como é,
+# para poder ser editada.
+proc qc::prettyCursor {} {
+    variable ed
+    variable TB
+    if {[info exists TB($ed,praw)]} {
+        set s $TB($ed,praw)
+        unset TB($ed,praw)
+        set r [::qc::_edw tag nextrange pword $s]
+        if {$r ne "" && [::qc::_edw compare [lindex $r 0] == $s]} {
+            ::qc::_edw tag add pel "$s +1c" [lindex $r 1]
+        }
+    }
+    set r [::qc::_edw tag prevrange pword "insert +1c"]
+    if {$r ne "" && [::qc::_edw compare insert <= [lindex $r 1]]} {
+        ::qc::_edw tag remove pel {*}$r
+        set TB($ed,praw) [lindex $r 0]
+    }
+}
+
+proc qc::drawPretty {} {
+    variable ed
+    variable H
+    variable C
+    set i 0
+    if {[info exists H(pretty)] && [dict size $H(pretty)]} {
+        set p [::qc::_edw index @0,0]
+        set bot [::qc::_edw index "@0,[winfo height $ed] lineend"]
+        while {[set r [::qc::_edw tag nextrange pword $p $bot]] ne ""} {
+            lassign $r s e
+            set p $e
+            if {"pel" ni [::qc::_edw tag names "$s +1c"]} continue
+            set word [::qc::_edw get $s $e]
+            set bb [::qc::_edw bbox $s]
+            if {$bb eq "" || ![dict exists $H(pretty) $word]} continue
+            lassign $bb x y w h
+            # cores e fonte das tags do caractere (em ordem de prioridade)
+            set fg $C(edfg)
+            set bg $C(edbg)
+            set font QcMono
+            foreach t [::qc::_edw tag names $s] {
+                if {$t eq "sel"} {
+                    set bg $C(sel)
+                    continue
+                }
+                set v [::qc::_edw tag cget $t -foreground]
+                if {$v ne ""} { set fg $v }
+                set v [::qc::_edw tag cget $t -background]
+                if {$v ne ""} { set bg $v }
+                set v [::qc::_edw tag cget $t -font]
+                if {$v ne ""} { set font $v }
+            }
+            set l $ed.pl$i
+            if {![winfo exists $l]} {
+                label $l -padx 0 -pady 0 -bd 0 -highlightthickness 0 -cursor xterm
+                bindtags $l [list $l QcPretty]
+            }
+            $l configure -text [dict get $H(pretty) $word] -foreground $fg \
+                -background $bg -font $font
+            set ::qc::plIdx($l) $s
+            place $l -x $x -y $y -width $w -height $h -bordermode outside
+            incr i
+        }
+    }
+    while {[winfo exists $ed.pl$i]} {
+        place forget $ed.pl$i
+        incr i
+    }
+}
+
+# Clique no símbolo: cursor no começo da palavra (que então aparece).
+proc qc::prettyClick {l} {
+    set ed [winfo parent $l]
+    if {![info exists ::qc::plIdx($l)]} return
+    $ed mark set insert $::qc::plIdx($l)
+    $ed tag remove sel 1.0 end
+    focus $ed
+}
+
+# a roda do mouse sobre o símbolo rola o editor
+bind QcPretty <1> {qc::prettyClick %W}
+foreach ev {MouseWheel Shift-MouseWheel} {
+    bind QcPretty <$ev> [string map [list EV $ev] {
+        event generate [winfo parent %W] <EV> -delta %D \
+            -x [expr {[winfo x %W] + %x}] -y [expr {[winfo y %W] + %y}]
+    }]
+}
+foreach ev {Button-4 Button-5 Shift-Button-4 Shift-Button-5} {
+    catch {
+        bind QcPretty <$ev> [string map [list EV $ev] {
+            event generate [winfo parent %W] <EV> \
+                -x [expr {[winfo x %W] + %x}] -y [expr {[winfo y %W] + %y}]
+        }]
+    }
 }
 
 # Verdadeiro se a posição está dentro de string/comentário (pelo destaque).
@@ -5219,6 +5342,7 @@ qc::language scheme {
     defWords {define define* define-syntax define-record-type define-values}
     defThroughBrace 1
     docString 1
+    pretty   {define λ}
     runners {
         {name guile label Guile exe {guile guile3.0} args {--no-auto-compile %O %W %F %A}
          wrapperExt .scm versionRe {Guile\)? ([0-9][0-9.]*)}
