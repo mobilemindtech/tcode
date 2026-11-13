@@ -580,7 +580,7 @@ proc qc::buildMenus {} {
     $m add checkbutton -label "Quebra de linha" -variable ::qc::cfg(wrap) -command qc::applyWrap
     $m add checkbutton -label "Mostrar definição ao passar o mouse" -variable ::qc::cfg(hoverdef) \
         -command qc::tipHide
-    $m add checkbutton -label "Símbolos no lugar de palavras (define → λ)" \
+    $m add checkbutton -label "Símbolos no lugar de palavras (define, lambda → λ)" \
         -variable ::qc::cfg(pretty) -command qc::highlight
     $m add checkbutton -label "Painel de arquivos" -accelerator Ctrl+B \
         -variable ::qc::cfg(sidebar) -command qc::applySide
@@ -5342,7 +5342,7 @@ qc::language scheme {
     defWords {define define* define-syntax define-record-type define-values}
     defThroughBrace 1
     docString 1
-    pretty   {define λ}
+    pretty   {define λ lambda λ}
     runners {
         {name guile label Guile exe {guile guile3.0} args {--no-auto-compile %O %W %F %A}
          wrapperExt .scm versionRe {Guile\)? ([0-9][0-9.]*)}

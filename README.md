@@ -20,7 +20,7 @@ pode ser interrompida a qualquer momento.
   parênteses/chaves/colchetes
 - Parênteses coloridos por nível de aninhamento ("rainbow") em Scheme, Tcl e
   OCaml; os que ficam sem par (ou com o par trocado, ex.: `(]`) em vermelho
-- Em Scheme, `define` aparece como `λ` (só na tela: o arquivo não muda; a
+- Em Scheme, `define` e `lambda` aparecem como `λ` (só na tela: o arquivo não muda; a
   palavra sob o cursor volta a aparecer para edição). Exibir > Símbolos no
   lugar de palavras liga/desliga
 - Abas: cada arquivo aberto tem a sua (com desfazer, cursor e linguagem
