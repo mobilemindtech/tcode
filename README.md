@@ -30,7 +30,12 @@ pode ser interrompida a qualquer momento.
   escolher. Ao parar o mouse sobre um nome, uma dica mostra a linha da
   definição e os comentários logo acima dela (Exibir > Mostrar definição ao
   passar o mouse). As definições vêm das palavras `defWords` da linguagem
-  (`proc`, `let rec`, `def`, `define`…) e das regexes `defPatterns`
+  (`proc`, `let rec`, `def`, `define`…) e das regexes `defPatterns`. Em Tcl e
+  Scheme, nomes que não são do projeto são procurados nas bibliotecas
+  instaladas (indexadas em segundo plano): os `proc`s do Tcl/Tk/tcllib (pelo
+  nome completo, ex.: `tk::TextKeySelect`) com os comentários acima deles, e
+  no Guile os procedimentos embutidos (`guile-procedures.txt`, com
+  assinatura e documentação) e os `define` dos módulos, com a docstring
 - Home vai ao primeiro caractere não branco da linha (de novo: coluna 0);
   Shift+Home seleciona até lá
 - Indentação automática por linguagem, Tab/Shift+Tab em blocos, comentar e

@@ -46,9 +46,12 @@
 # defThroughBrace, col0, infoRe, warnRe, grayInfo, rainbow (1 = parênteses
 # coloridos por nível de aninhamento; ver qc::rainbow), defPatterns (regexes
 # extras de definição para o F12, com UM grupo = o nome; as palavras de
-# defWords já geram uma) (ver langDefaults).
+# defWords já geram uma), docString (1 = string logo após a assinatura é
+# documentação, como em Scheme) (ver langDefaults).
 # Hooks opcionais: procs em ::qc::lang::<id>:: -- init, wordTag, prepare,
-# defaultExt, newlineIndent, stderrLine, findExe (ver as embutidas).
+# defaultExt, newlineIndent, stderrLine, findExe, apiSources, apiParse,
+# defQual (ver as embutidas; as três últimas montam o índice de biblioteca
+# usado na dica e no F12).
 # Tags de cor disponíveis: veja qc::S; "styles" define novas.
 
 package require Tk 8.6-
@@ -132,6 +135,7 @@ namespace eval qc {
         sub {} styles {} indentAfter {[\{\[\(]\s*$} dedentChars "\}\)\]"
         runners {} errPatterns {} col0 0 infoRe "" warnRe "" grayInfo 0
         templates {} autoPairs {() [] \{\} \"\" ''} rainbow 0 defPatterns {}
+        docString 0
     }
     namespace eval lang {}
 }
@@ -464,7 +468,8 @@ proc qc::buildUI {} {
 
     # Barra de status
     ttk::frame .sb
-    ttk::label .sb.msg -textvariable ::qc::status -style Status.TLabel -anchor w
+    # -width 1: mensagens longas não podem alargar a janela (evita loop com as abas)
+    ttk::label .sb.msg -textvariable ::qc::status -style Status.TLabel -anchor w -width 1
     ttk::label .sb.pos -textvariable ::qc::lncol -style Status.TLabel -width 16
     ttk::label .sb.run -textvariable ::qc::interp -style Status.TLabel
     pack .sb.run .sb.pos -side right
@@ -1274,6 +1279,8 @@ proc qc::setLang {id} {
     highlight
     updateTitle
     detectVersion
+    # índice de biblioteca da linguagem (dica/F12), em segundo plano
+    if {$cfg(hoverdef)} { apiStart $id }
 }
 
 # Monta a regex única da linguagem: cada token vira um grupo; um token com
@@ -2294,8 +2301,12 @@ proc qc::defRegexes {id} {
         if {[catch {regexp -about $re} ab] || [lindex $ab 0] < 1} continue
         lappend out $re [expr {[lindex $ab 0] + 1}]
     }
+    # palavras-chave não são nomes de definição (builtins podem ser)
     set kw {}
-    dict for {tag list} [lget words $id] { foreach w $list { dict set kw $w 1 } }
+    set wd [lget words $id]
+    if {[dict exists $wd keyword]} {
+        foreach w [dict get $wd keyword] { dict set kw $w 1 }
+    }
     set p [regsub {(.)\1+$} [lget comment $id] {\1}]
     set DR($id) [list $out $kw $p [lget commentEnd $id]]
     return $DR($id)
@@ -2306,10 +2317,14 @@ proc qc::defKey {name} {
     return [regsub {^.*::} $name {}]
 }
 
-# Lista de definições de um texto.
-proc qc::defsIn {text id} {
+# Lista de definições de um texto: {nome linha coluna assinatura comentários
+# docstring qualificado}. Com qual=1 (índice de biblioteca) o hook defQual da
+# linguagem dá o nome completo; "" descarta a definição (ex.: interna).
+proc qc::defsIn {text id {qual 0}} {
     lassign [defRegexes $id] res kw cpre cend
     if {![llength $res]} { return {} }
+    set qh [expr {$qual ? [hook defQual $id] : ""}]
+    set dstr [lget docString $id]
     set lines [split $text \n]
     set starts {}
     set o 0
@@ -2324,31 +2339,83 @@ proc qc::defsIn {text id} {
         for {set i 0} {$i < [llength $m]} {incr i $step} {
             lassign [lindex $m $i+1] a z
             if {$a < 0} continue
-            set key [defKey [string range $text $a $z]]
+            set raw [string range $text $a $z]
+            set key [defKey $raw]
             if {$key eq "" || [dict exists $kw $key] || [dict exists $seen $a]} continue
             dict set seen $a 1
             set L [lsearch -bisect -integer $starts $a]
             set col [expr {$a - [lindex $starts $L]}]
-            lappend out [list $key [expr {$L + 1}] $col \
-                [string trim [lindex $lines $L]] [defDoc $lines $L $cpre $cend]]
+            set q ""
+            if {$qual} {
+                set q [expr {$qh ne "" ? [$qh $lines $L $raw] : $key}]
+                if {$q eq ""} continue
+            }
+            lassign [defSig $lines $L $col] sig E
+            set post [expr {$dstr ? [defDocString $lines $E] : {}}]
+            lappend out [list $key [expr {$L + 1}] $col $sig \
+                [defDoc $lines $L $cpre $cend] $post $q]
         }
     }
     return $out
 }
 
-# Comentários logo acima da linha L (índice 0): linhas com o prefixo de
-# comentário ou um bloco terminado em */ ou commentEnd.
+# Assinatura: a linha da definição e, se os parênteses abertos a partir do
+# nome continuarem abertos, as seguintes (até 8). Devolve {texto últimaLinha}.
+proc qc::defSig {lines L col} {
+    set line [lindex $lines $L]
+    if {$col > 0 && [string index $line $col-1] eq "("} { incr col -1 }
+    set rest [string range $line $col end]
+    set depth [expr {[regexp -all {\(} $rest] - [regexp -all {\)} $rest]}]
+    set sig [list [string trim $line]]
+    set E $L
+    while {$depth > 0 && $E + 1 < [llength $lines]} {
+        incr E
+        set ln [lindex $lines $E]
+        if {$E < $L + 8} { lappend sig "  [string trim $ln]" }
+        incr depth [expr {[regexp -all {\(} $ln] - [regexp -all {\)} $ln]}]
+        if {$E >= $L + 30} break
+    }
+    if {$E >= $L + 8} { lappend sig "  …" }
+    return [list [join $sig \n] $E]
+}
+
+# Docstring (Scheme): string que começa na linha seguinte à assinatura.
+proc qc::defDocString {lines E} {
+    set t [string trim [lindex $lines [incr E]]]
+    if {[string index $t 0] ne "\""} { return {} }
+    set out {}
+    set t [string range $t 1 end]
+    while {[llength $out] < 12} {
+        if {[regexp {^((?:[^"\\]|\\.)*)"} $t -> body]} {
+            lappend out [string trim $body]
+            break
+        }
+        lappend out [string trim $t]
+        if {[incr E] >= [llength $lines]} break
+        set t [lindex $lines $E]
+    }
+    return [lmap l $out {string map {\\" \" \\\\ \\} $l}]
+}
+
+# Comentários logo acima da linha L (índice 0; pode haver uma linha em
+# branco entre eles): linhas com o prefixo de comentário ou um bloco
+# terminado em */ ou commentEnd. Linhas só com o prefixo no começo e no fim
+# do bloco são descartadas.
 proc qc::defDoc {lines L cpre cend} {
     set doc {}
     set k [expr {$L - 1}]
     set t [string trim [lindex $lines $k]]
+    # aceita uma linha em branco entre o comentário e a definição
+    if {$t eq "" && $k > 0} {
+        set t [string trim [lindex $lines [incr k -1]]]
+    }
     set ends [list */]
     if {$cend ne ""} { lappend ends $cend }
     set block 0
     foreach e $ends {
         if {$t ne "" && [string match "*$e" $t]} { set block 1 }
     }
-    while {$k >= 0 && [llength $doc] < 8} {
+    while {$k >= 0 && [llength $doc] < 60} {
         set t [string trim [lindex $lines $k]]
         if {$block} {
             set doc [linsert $doc 0 $t]
@@ -2360,7 +2427,29 @@ proc qc::defDoc {lines L cpre cend} {
         }
         incr k -1
     }
-    return $doc
+    if {$block || ![llength $doc]} { return [lrange $doc 0 9] }
+    # parágrafos separados por linhas só com o prefixo; sem os de copyright
+    # e licença
+    set pr [regsub {(.)\1+$} $cpre {\1}]
+    set paras {}
+    set cur {}
+    foreach t $doc {
+        if {[string trim $t "$pr "] eq ""} {
+            if {[llength $cur]} { lappend paras $cur; set cur {} }
+        } else {
+            lappend cur $t
+        }
+    }
+    if {[llength $cur]} { lappend paras $cur }
+    set out {}
+    foreach p $paras {
+        if {[regexp -nocase {copyright|license|warrant|\$Id|RCS:} [join $p]]} continue
+        if {[llength $out]} { lappend out $pr }
+        lappend out {*}$p
+    }
+    set out [lrange $out 0 9]
+    while {[llength $out] && [lindex $out end] eq $pr} { set out [lrange $out 0 end-1] }
+    return $out
 }
 
 proc qc::defIndexFile {f id data} {
@@ -2420,7 +2509,102 @@ proc qc::findDefs {name} {
             }
         }
     }
+    if {![llength $out]} { set out [apiDefs $id $name] }
     return $out
+}
+
+# --- índice de biblioteca ---------------------------------------------------
+# Definições das bibliotecas instaladas da linguagem (hook apiSources: lista
+# de arquivos e pastas). Indexadas em segundo plano na primeira consulta;
+# AX(<lang>) = dicionário nome completo -> itens no formato de findDefs.
+# Itens sem código-fonte (ex.: procedimentos do Guile escritos em C) têm
+# linha 0. O hook apiParse lê formatos próprios (ex.: guile-procedures.txt).
+
+namespace eval qc {
+    variable AX
+    variable AS               ;# AS(<lang>,todo|dirs|done): varredura
+    array set AX {}
+    array set AS {}
+}
+
+proc qc::apiStart {id} {
+    variable AS
+    variable AX
+    if {[info exists AS($id,done)]} return
+    set AS($id,done) 0
+    set AX($id) [dict create]
+    set AS($id,todo) {}
+    set AS($id,dirs) {}
+    set AS($id,n) 0
+    set h [hook apiSources $id]
+    if {$h eq "" || [catch {$h} srcs]} {
+        set AS($id,done) 1
+        return
+    }
+    foreach p $srcs {
+        if {[file isdirectory $p]} {
+            lappend AS($id,dirs) $p
+        } elseif {[file isfile $p]} {
+            lappend AS($id,todo) $p
+        }
+    }
+    after 200 [list qc::apiStep $id]
+}
+
+proc qc::apiStep {id} {
+    variable AS
+    variable acMaxSize
+    set exts [lget ext $id]
+    set t0 [clock milliseconds]
+    while {[clock milliseconds] - $t0 < 15} {
+        if {[llength $AS($id,todo)]} {
+            set AS($id,todo) [lassign $AS($id,todo) f]
+            catch {apiIndexFile $id $f}
+        } elseif {[llength $AS($id,dirs)] && $AS($id,n) < 5000} {
+            set AS($id,dirs) [lassign $AS($id,dirs) d]
+            foreach p [lsort [glob -nocomplain -directory $d -types d *]] {
+                lappend AS($id,dirs) $p
+            }
+            foreach p [lsort [glob -nocomplain -directory $d -types f *]] {
+                if {[string tolower [file extension $p]] in $exts
+                    && ![catch {file size $p} sz] && $sz <= $acMaxSize} {
+                    lappend AS($id,todo) $p
+                    incr AS($id,n)
+                }
+            }
+        } else {
+            set AS($id,done) 1
+            return
+        }
+    }
+    after 5 [list qc::apiStep $id]
+}
+
+proc qc::apiIndexFile {id f} {
+    variable AX
+    set data [readFile $f]
+    set h [hook apiParse $id]
+    set items -
+    if {$h ne ""} { set items [$h $f $data] }
+    if {$items eq "-"} {
+        set items {}
+        foreach d [defsIn $data $id 1] {
+            lappend items [list [lindex $d end] [list $f "" {*}$d]]
+        }
+    }
+    foreach it $items {
+        lassign $it q item
+        dict lappend AX($id) $q $item
+    }
+}
+
+# Nome completo procurado no índice (sem "::" no começo).
+proc qc::apiDefs {id name} {
+    variable AX
+    apiStart $id
+    set q [regsub {^::} $name {}]
+    if {![info exists AX($id)] || ![dict exists $AX($id) $q]} { return {} }
+    return [dict get $AX($id) $q]
 }
 
 # Palavra (pela regex "word" da linguagem) na posição idx do editor:
@@ -2452,7 +2636,13 @@ proc qc::defsElsewhere {defs at} {
 
 proc qc::defLabel {d} {
     lassign $d f w name line
+    if {$line == 0} { return "[file tail $f] (embutido, sem código-fonte)" }
     return "[expr {$f eq "" ? "Sem título" : [file tail $f]}]:$line"
+}
+
+# Só as definições que têm código-fonte para abrir.
+proc qc::defsWithSource {defs} {
+    lmap d $defs { if {[lindex $d 3] == 0} continue; set d }
 }
 
 # F12 (idx = insert) ou Ctrl+clique (idx = @x,y).
@@ -2466,9 +2656,11 @@ proc qc::goToDefinition {{idx insert}} {
     }
     lassign $wd name a
     set all [findDefs $name]
-    set defs [defsElsewhere $all $a]
+    set others [defsElsewhere $all $a]
+    set defs [defsWithSource $others]
     if {![llength $defs]} {
-        set ::qc::status [expr {[llength $all] ? "Já está na definição de $name"
+        set ::qc::status [expr {[llength $others] ? "$name é embutido (sem código-fonte)"
+            : [llength $all] ? "Já está na definição de $name"
             : "Definição de $name não encontrada"}]
         return
     }
@@ -2481,7 +2673,7 @@ proc qc::goToDefinition {{idx insert}} {
     destroy $m
     menu $m -tearoff 0
     foreach d $defs {
-        set txt [lindex $d 5]
+        set txt [lindex [split [lindex $d 5] \n] 0]
         if {[string length $txt] > 70} { set txt "[string range $txt 0 68]…" }
         $m add command -label "[defLabel $d]   $txt" -command [list qc::gotoDef $d]
     }
@@ -2600,7 +2792,7 @@ proc qc::linkUpdate {w x y} {
     set key [lrange $wd 0 1]
     if {$key eq $linkKey} return
     linkClear
-    if {![llength $wd] || ![llength [defsForWord $wd]]} return
+    if {![llength $wd] || ![llength [defsWithSource [defsForWord $wd]]]} return
     set linkKey $key
     $w tag add deflink [lindex $wd 1] [lindex $wd 2]
     $w configure -cursor hand2
@@ -2626,7 +2818,7 @@ proc qc::linkAtPointer {w} {
 proc qc::ctrlClick {w x y} {
     tipHide
     set wd [wordUnderMouse $w $x $y]
-    if {[llength $wd] && [llength [defsForWord $wd]]} {
+    if {[llength $wd] && [llength [defsWithSource [defsForWord $wd]]]} {
         linkClear
         goToDefinition @$x,$y
     } else {
@@ -2656,16 +2848,21 @@ proc qc::tipShow {w wd x y} {
     $t.t tag configure sig -foreground $C(edfg)
     set n 0
     foreach d $defs {
-        if {[incr n] > 3} break
-        lassign $d f - - line - sig doc
+        # até 3 definições, parando antes se a dica já estiver grande
+        if {$n >= 3 || ($n > 0 && [$t.t count -lines 1.0 end] > 18)} break
+        incr n
+        lassign $d f - - line - sig doc post
         if {$n > 1} { $t.t insert end \n }
         $t.t insert end "[defLabel $d]\n" loc
         foreach dl $doc { $t.t insert end "$dl\n" doc }
-        if {[string length $sig] > 120} { set sig "[string range $sig 0 118]…" }
-        $t.t insert end "$sig\n" sig
+        foreach sl [split $sig \n] {
+            if {[string length $sl] > 120} { set sl "[string range $sl 0 118]…" }
+            $t.t insert end "$sl\n" sig
+        }
+        foreach dl $post { $t.t insert end "$dl\n" doc }
     }
-    if {[llength $defs] > 3} {
-        $t.t insert end "+[expr {[llength $defs] - 3}] outras (F12 para escolher)\n" loc
+    if {[llength $defs] > $n} {
+        $t.t insert end "+[expr {[llength $defs] - $n}] outras (F12 para escolher)\n" loc
     }
     $t.t delete end-1c
     set wmax 10
@@ -3616,7 +3813,11 @@ proc qc::buildTabBar {c} {
     set h [expr {[font metrics TkDefaultFont -linespace] + 12}]
     canvas $c -height $h -background $C(trough) -highlightthickness 0 -bd 0 \
         -xscrollincrement 24
-    bind $c <Configure> qc::drawTabs
+    # só redesenha se a largura mudou: drawTabs recria os itens, o que gera
+    # <Enter> na aba sob o mouse e pode realimentar <Configure>
+    bind $c <Configure> {
+        if {%w != [set ::qc::tabBarW]} { set ::qc::tabBarW %w; qc::drawTabs }
+    }
     bind $c <MouseWheel> {%W xview scroll [expr {%D > 0 ? -1 : 1}] units}
     catch {bind $c <Button-4> {%W xview scroll -1 units}}
     catch {bind $c <Button-5> {%W xview scroll 1 units}}
@@ -3642,6 +3843,13 @@ proc qc::tabMenu {w X Y} {
     .tabpop entryconfigure "Copiar caminho" \
         -state [expr {$::qc::TB($w,file) eq "" ? "disabled" : "normal"}]
     tk_popup .tabpop $X $Y
+}
+
+set ::qc::tabBarW 0
+
+# Só altera a barra de status se o texto mudou (evita relayout à toa).
+proc qc::setStatus {msg} {
+    if {$::qc::status ne $msg} { set ::qc::status $msg }
 }
 
 proc qc::drawTabs {} {
@@ -3692,7 +3900,7 @@ proc qc::drawTabs {} {
         $c bind tab$n <1> [list qc::activateTab $w]
         $c bind tab$n <2> [list qc::closeTab $w]
         $c bind tab$n <3> [list qc::tabMenu $w %X %Y]
-        $c bind tab$n <Enter> [list set ::qc::status [expr {$f eq "" ? "" : $f}]]
+        $c bind tab$n <Enter> [list qc::setStatus $f]
         $c bind cls$n <1> [list qc::closeTab $w]
         $c bind cls$n <2> [list qc::closeTab $w]
         $c bind cls$n <Enter> [list $c itemconfigure $xx -text × -fill #ffffff]
@@ -4667,6 +4875,47 @@ proc qc::lang::tcl::init {} {
 }
 
 # Comandos só são destacados em posição de comando.
+# Bibliotecas: pastas de "info library", do Tk e do auto_path.
+proc qc::lang::tcl::apiSources {} {
+    set out {}
+    set cands [list [info library]]
+    if {[info exists ::tk_library]} { lappend cands $::tk_library }
+    lappend cands {*}$::auto_path
+    foreach d $cands {
+        set d [file normalize $d]
+        if {[file isdirectory $d] && $d ni $out} { lappend out $d }
+    }
+    # pastas dentro de outras da lista seriam lidas duas vezes
+    lmap d $out {
+        foreach o $out {
+            if {$o ne $d && [string first $o/ $d] == 0} { set d ""; break }
+        }
+        if {$d eq ""} continue
+        set d
+    }
+}
+
+# Nome completo de um proc de biblioteca: o qualificado como escrito ou,
+# se indentado, prefixado pelo "namespace eval" que o envolve. "" = proc
+# dentro de outra construção (descartado).
+proc qc::lang::tcl::defQual {lines L name} {
+    set name [regsub {^::} $name {}]
+    if {[string first :: $name] >= 0} { return $name }
+    regexp {^[ \t]*} [lindex $lines $L] ind
+    set n [string length $ind]
+    if {$n == 0} { return $name }
+    for {set k [expr {$L - 1}]} {$k >= 0} {incr k -1} {
+        set l [lindex $lines $k]
+        if {[regexp {^([ \t]*)namespace[ \t]+eval[ \t]+([^ \t\{]+)} $l -> i2 ns]
+            && [string length $i2] < $n} {
+            set ns [regsub {^::} $ns {}]
+            return [expr {$ns eq "" ? $name : "${ns}::$name"}]
+        }
+        if {[regexp {^[^ \t#\}]} $l]} { return "" }
+    }
+    return ""
+}
+
 proc qc::lang::tcl::wordTag {word tag txt a} {
     if {$tag eq ""} { return "" }
     if {$word in {else elseif then finally on trap}} { return keyword }
@@ -4969,6 +5218,7 @@ qc::language scheme {
     }
     defWords {define define* define-syntax define-record-type define-values}
     defThroughBrace 1
+    docString 1
     runners {
         {name guile label Guile exe {guile guile3.0} args {--no-auto-compile %O %W %F %A}
          wrapperExt .scm versionRe {Guile\)? ([0-9][0-9.]*)}
@@ -4990,6 +5240,68 @@ qc::language scheme {
          optsHint "--libdirs ./lib   --optimize-level 2"
          errPatterns {{line ([0-9]+), char ([0-9]+) of %F}} col0 0}
     }
+}
+
+# Bibliotecas do Guile: guile-procedures.txt (procedimentos em C) e os
+# módulos .scm, achados a partir do executável (<prefixo>/share/guile/<versão>).
+proc qc::lang::scheme::apiSources {} {
+    set rn ""
+    foreach r [::qc::lget runners scheme] {
+        if {[dict get $r name] eq "guile"} { set rn $r }
+    }
+    if {$rn eq ""} { return {} }
+    set exe [lindex [::qc::findExe $rn scheme] 0]
+    if {$exe eq ""} { return {} }
+    for {set i 0} {$i < 10 && [file type $exe] eq "link"} {incr i} {
+        set exe [file normalize [file join [file dirname $exe] [file readlink $exe]]]
+    }
+    set share [file join [file dirname [file dirname $exe]] share guile]
+    set vers [lsort -dictionary [glob -nocomplain -directory $share -types d {[0-9]*}]]
+    if {![llength $vers]} { return {} }
+    set d [lindex $vers end]
+    set out {}
+    set txt [file join $d guile-procedures.txt]
+    if {[file isfile $txt]} { lappend out $txt }
+    lappend out $d
+    set site [file join $share site [file tail $d]]
+    if {[file isdirectory $site]} { lappend out $site }
+    return $out
+}
+
+# Só os define de nível superior (linha começando por "(").
+proc qc::lang::scheme::defQual {lines L name} {
+    if {[string index [lindex $lines $L] 0] ne "("} { return "" }
+    return $name
+}
+
+# guile-procedures.txt: blocos separados por form feed, cada um com uma ou
+# mais linhas "- Scheme Procedure: nome args" e o texto indentado.
+proc qc::lang::scheme::apiParse {f data} {
+    if {[file tail $f] ne "guile-procedures.txt"} { return - }
+    set out {}
+    foreach blk [lrange [split $data \f] 1 end] {
+        set lines [split $blk \n]
+        set name [string trim [lindex $lines 0]]
+        if {$name eq ""} continue
+        set sigs {}
+        set doc {}
+        foreach l [lrange $lines 1 end] {
+            if {[regexp {^- Scheme Procedure: (.*)$} $l -> s]} {
+                lappend sigs "([string trim $s])"
+            } elseif {[llength $sigs] && [llength $doc] < 14
+                      && ([string trim $l] ne "" || [llength $doc])} {
+                lappend doc [string trimright $l]
+            }
+        }
+        if {![llength $sigs]} continue
+        # tira a indentação comum e as linhas vazias do fim
+        while {[llength $doc] && [string trim [lindex $doc end]] eq ""} {
+            set doc [lrange $doc 0 end-1]
+        }
+        set doc [lmap l $doc {regsub {^     } $l {}}]
+        lappend out [list $name [list $f "" $name 0 0 [join $sigs \n] {} $doc $name]]
+    }
+    return $out
 }
 
 # Indentação estilo Lisp: um nível além do "(" que envolve o cursor.
