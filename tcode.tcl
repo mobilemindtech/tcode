@@ -4007,9 +4007,15 @@ proc qc::drawTabs {} {
         set tt [$c create text [expr {$x + 12}] $cy -anchor w -text $name \
             -fill $fg -font TkDefaultFont -tags [list tab$n]]
         set tx [lindex [$c bbox $tt] 2]
+        # O botão de fechar recebe os eventos por uma área fixa; o glifo fica
+        # "disabled" (fora da detecção do mouse). ● é mais largo que ×: se o
+        # glifo fosse o alvo, com o mouse na borda <Enter> trocaria ● por ×,
+        # o mouse ficaria fora, <Leave> voltaria ● e o ciclo não terminaria.
+        $c create rectangle [expr {$tx + 5}] 4 [expr {$tx + 23}] [expr {$h - 4}] \
+            -fill $bg -outline "" -tags [list cls$n]
         set xx [$c create text [expr {$tx + 14}] $cy -anchor center \
             -text [expr {$mod ? "●" : "×"}] -fill $fg -font TkDefaultFont \
-            -tags [list cls$n]]
+            -state disabled]
         set x1 [expr {$tx + 26}]
         $c create rectangle $x 0 $x1 $h -fill $bg -outline "" -tags [list tab$n]
         $c create line $x1 4 $x1 [expr {$h - 4}] -fill $C(ui)
