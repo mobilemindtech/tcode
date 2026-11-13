@@ -729,6 +729,9 @@ proc qc::setupBindings {} {
     # com seleção, ←/→ vão para o início/fim dela
     bind QcEdit <Left>          {if {[qc::selJump Left %s]} break}
     bind QcEdit <Right>         {if {[qc::selJump Right %s]} break}
+    # Home vai ao primeiro caractere não branco (Shift+Home seleciona até ele)
+    bind QcEdit <Home>          {qc::moveCaret Home 0; %W see insert; break}
+    bind QcEdit <Shift-Home>    {qc::moveCaret Home 1; %W see insert; break}
     bind QcEdit <Control-d>     {qc::selectNext; break}
     bind QcEdit <Control-D>     {qc::duplicateLine; break}
     bind QcEdit <Shift-Alt-Up>   {qc::addCaretLine -1; break}
@@ -2391,6 +2394,7 @@ proc qc::moveCaret {k {shift 0}} {
             Left "insert -1c" Right "insert +1c" Home "insert linestart"
             End "insert lineend" Up "insert -1 line" Down "insert +1 line"
         } $k]
+        if {$k eq "Home"} { set to [smartHome] }
     }
     set to [$ed index $to]
     if {[$ed compare $to > end-1c]} { set to [$ed index end-1c] }
@@ -2409,6 +2413,18 @@ proc qc::moveCaret {k {shift 0}} {
         }
     }
     $ed mark set insert $to
+}
+
+# Home "inteligente": vai ao primeiro caractere não branco da linha; se o
+# cursor já estiver lá, vai ao início da linha.
+proc qc::smartHome {} {
+    variable ed
+    set ls [$ed index "insert linestart"]
+    set line [$ed get $ls "insert lineend"]
+    regexp -indices {^[ \t]*} $line m
+    set first [$ed index "$ls +[expr {[lindex $m 1] + 1}]c"]
+    if {[$ed compare insert == $first]} { return $ls }
+    return $first
 }
 
 # ←/→ sem Shift com texto selecionado: cursor no início/fim da seleção.
