@@ -54,7 +54,11 @@ package require Tk 8.6-
 namespace eval qc {
     variable version 2.0
     variable scriptPath [file normalize [info script]]
-    variable ed  ""          ;# editor
+    variable ed  ""          ;# editor da aba ativa
+    variable tabs {}         ;# editores abertos (um widget text por aba), em ordem
+    variable TB              ;# TB(<editor>,file|lang|hltags): estado de cada aba
+    array set TB {}
+    variable tabSeq 0
     variable con ""          ;# console de saída
     variable gut ""          ;# canvas com números de linha
     variable file ""         ;# arquivo atual ("" = sem nome)
@@ -92,7 +96,7 @@ namespace eval qc {
     array set cfg {
         fontsize 12 wrap 0 autoclear 1 recent {} geometry 1100x800
         lastdir "" lang "" folder "" sidebar 0 sidew 240 autocomp 1
-        terminal 0 termpos side termcmd ""
+        terminal 0 termpos side termcmd "" tabs {} tabcur ""
     }
     variable T                ;# terminal embutido: T(chan), T(pid), T(shown)
     array set T {}
@@ -412,23 +416,21 @@ proc qc::buildUI {} {
     buildSide
     ttk::panedwindow .pw -orient vertical
 
+    # editor: barra de abas em cima; cada aba é um widget text (ver newEditor)
+    # na coluna 1 da linha 1, e só o da aba ativa fica visível
     set f [ttk::frame .pw.ed]
+    buildTabBar $f.tabs
     set gut [canvas $f.gut -background $C(gutbg) -highlightthickness 0 -bd 0 -width 40]
-    set ed [text $f.t -background $C(edbg) -foreground $C(edfg) \
-        -insertbackground $C(caret) -insertwidth 2 -selectbackground $C(sel) \
-        -selectforeground {} -inactiveselectbackground $C(sel) \
-        -font QcMono -undo 1 -maxundo 0 -autoseparators 1 \
-        -wrap [expr {$cfg(wrap) ? "word" : "none"}] \
-        -bd 0 -highlightthickness 0 -padx 6 -pady 4 -tabstyle wordprocessor \
-        -yscrollcommand qc::edYscroll -xscrollcommand qc::edXscroll]
-    ttk::scrollbar $f.sy -orient vertical -command [list $ed yview]
-    ttk::scrollbar $f.sx -orient horizontal -command [list $ed xview]
+    ttk::scrollbar $f.sy -orient vertical -command {qc::edScroll yview}
+    ttk::scrollbar $f.sx -orient horizontal -command {qc::edScroll xview}
     buildFindBar $f.find
-    grid $gut $ed $f.sy -sticky nsew
-    grid x $f.sx -sticky ew
-    grid $f.find -columnspan 3 -sticky ew
+    grid $f.tabs -row 0 -column 0 -columnspan 3 -sticky ew
+    grid $gut -row 1 -column 0 -sticky nsew
+    grid $f.sy -row 1 -column 2 -sticky ns
+    grid $f.sx -row 2 -column 1 -sticky ew
+    grid $f.find -row 3 -column 0 -columnspan 3 -sticky ew
     grid columnconfigure $f 1 -weight 1
-    grid rowconfigure $f 0 -weight 1
+    grid rowconfigure $f 1 -weight 1
     grid remove $f.find
     if {$cfg(wrap)} { grid remove $f.sx }
 
@@ -471,12 +473,10 @@ proc qc::buildUI {} {
     pack .hp -side top -fill both -expand 1
 
     setupTags
-    installProxy $ed
     setupBindings
+    activateTab [newEditor]
 
     bind $gut <Configure> qc::schedGutter
-    bind $ed <Configure> qc::schedGutter
-    bind $ed <<Modified>> qc::updateTitle
     wm protocol . WM_DELETE_WINDOW qc::quit
 
     # divisor em 70% editor / 30% console até o usuário arrastá-lo
@@ -506,7 +506,9 @@ proc qc::buildMenus {} {
     $m add separator
     $m add command -label "Salvar"             -accelerator Ctrl+S       -command qc::save
     $m add command -label "Salvar como…"       -accelerator Ctrl+Shift+S -command qc::saveAs
-    $m add command -label "Fechar arquivo"     -accelerator Ctrl+F4      -command qc::closeFile
+    $m add command -label "Fechar aba"         -accelerator Ctrl+F4      -command qc::closeFile
+    $m add command -label "Próxima aba"        -accelerator Ctrl+Tab     -command {qc::cycleTab 1}
+    $m add command -label "Aba anterior"       -accelerator Ctrl+Shift+Tab -command {qc::cycleTab -1}
     $m add separator
     $m add command -label "Sair"               -accelerator Ctrl+Q       -command qc::quit
     updateRecentMenu
@@ -638,10 +640,8 @@ proc qc::buildFindBar {w} {
     }
 }
 
-# Tags fixas do editor e do console (as de sintaxe vêm da linguagem).
-proc qc::setupTags {} {
-    variable ed
-    variable con
+# Tags fixas de um editor (as de sintaxe vêm da linguagem).
+proc qc::setupEdTags {ed} {
     variable C
     $ed tag configure curline   -background $C(curline)
     $ed tag configure errline   -background $C(errline)
@@ -650,7 +650,12 @@ proc qc::setupTags {} {
     $ed tag configure bbad      -background $C(bbad)
     $ed tag configure msel      -background $C(sel)
     $ed tag lower curline
+}
 
+# Tags do console.
+proc qc::setupTags {} {
+    variable con
+    variable C
     $con tag configure stdout -foreground $C(confg)
     $con tag configure stderr -foreground $C(stderr)
     $con tag configure warn   -foreground $C(warn)
@@ -685,6 +690,11 @@ proc qc::setupBindings {} {
         <Control-s>         qc::save
         <Control-S>         qc::saveAs
         <Control-F4>        qc::closeFile
+        <Control-Tab>       {qc::cycleTab 1}
+        <Control-Shift-Tab> {qc::cycleTab -1}
+        <Control-ISO_Left_Tab> {qc::cycleTab -1}
+        <Control-Next>      {qc::cycleTab 1}
+        <Control-Prior>     {qc::cycleTab -1}
         <Control-q>         qc::quit
         <Control-r>         {qc::run 0}
         <Control-Return>    {qc::run 0}
@@ -760,7 +770,6 @@ proc qc::setupBindings {} {
     bind QcMulti <Control-Button-1>  {qc::addCaretAt %x %y; break}
     bind QcMulti <<Paste>>           {if {[llength $::qc::mcur]} {qc::multiApply {qc::paste $::qc::ed}; break}}
 
-    bindtags $ed [list $ed QcComp QcMulti QcKeys QcEdit Text . all]
     bindtags $con [list $con QcKeys Text . all]
     foreach e {.pw.ed.find.pat .pw.ed.find.rep} {
         bindtags $e [list $e QcKeys TEntry . all]
@@ -779,16 +788,19 @@ proc qc::wheel {d} {
     $::qc::ed yview scroll [expr {$d > 0 ? -3 : 3}] units
 }
 
-# Proxy do widget de texto: detecta qualquer alteração do conteúdo e do cursor.
+# Proxy do widget de texto: detecta qualquer alteração do conteúdo e do
+# cursor. O comando original vira ::qc::raw<caminho>; ::qc::_edw aponta
+# sempre para o da aba ativa (ver activateTab).
 proc qc::installProxy {w} {
-    rename $w ::qc::_edw
-    interp alias {} $w {} ::qc::edProxy
+    rename $w ::qc::raw$w
+    interp alias {} $w {} ::qc::edProxy $w
 }
 
-proc qc::edProxy {args} {
-    if {[catch {::qc::_edw {*}$args} r o]} {
+proc qc::edProxy {w args} {
+    if {[catch {::qc::raw$w {*}$args} r o]} {
         return -code error -errorcode [dict get $o -errorcode] $r
     }
+    if {$w ne $::qc::ed} { return $r }
     switch -- [lindex $args 0] {
         insert - delete - replace { onChange }
         edit {
@@ -1074,8 +1086,11 @@ proc qc::runProject {pf name} {
         conAppend "$pf: comando \"$name\" não encontrado\n" stderr
         return
     }
-    # o build lê do disco: salva o arquivo aberto antes
-    if {$file ne "" && [$ed edit modified] && ![saveTo $file]} return
+    # o build lê do disco: salva antes os arquivos abertos modificados
+    foreach w $::qc::tabs {
+        set f $::qc::TB($w,file)
+        if {$f ne "" && [$w edit modified] && ![saveTo $f $w]} return
+    }
     set root [file dirname [file normalize $pf]]
     set cmd [string map [list %F [shQuote $file] %R [shQuote $root]] [dict get $cmds $name]]
     if {$cfg(autoclear)} { clearConsole }
@@ -1222,6 +1237,7 @@ proc qc::setLang {id} {
         }
     }
     set lang $id
+    set ::qc::TB($::qc::ed,lang) $id
     set ::qc::langSel $id
     set ::qc::langName [lget name]
     set cfg(lang) $id
@@ -1239,8 +1255,11 @@ proc qc::compileLang {} {
     variable H
     variable S
     variable ed
+    variable TB
     set d [ldict]
-    foreach t $H(tags) { catch {::qc::_edw tag delete $t} }
+    if {[info exists TB($ed,hltags)]} {
+        foreach t $TB($ed,hltags) { catch {::qc::_edw tag delete $t} }
+    }
     array unset H
     set parts {}
     set specs {}
@@ -1291,6 +1310,7 @@ proc qc::compileLang {} {
     }
     set tags [lsort -unique [concat $tags $subtags]]
     set H(tags) $tags
+    set TB($ed,hltags) $tags
     set H(subtags) [lsort -unique $subtags]
 
     set styles [dict merge $S $rbStyles [dict get $d styles]]
@@ -1421,15 +1441,22 @@ proc qc::off2idx {starts off} {
 # Números de linha, cursor, pares de chaves
 # ---------------------------------------------------------------------------
 
-proc qc::edYscroll {args} {
+proc qc::edYscroll {w args} {
+    if {$w ne $::qc::ed} return
     .pw.ed.sy set {*}$args
     schedGutter
     if {[llength $::qc::mcur]} { after idle qc::drawCarets }
 }
 
-proc qc::edXscroll {args} {
+proc qc::edXscroll {w args} {
+    if {$w ne $::qc::ed} return
     .pw.ed.sx set {*}$args
     if {[llength $::qc::mcur]} { after idle qc::drawCarets }
+}
+
+# barras de rolagem -> editor da aba ativa
+proc qc::edScroll {cmd args} {
+    $::qc::ed $cmd {*}$args
 }
 
 proc qc::schedGutter {} {
@@ -1897,6 +1924,11 @@ proc qc::acPool {} {
     set re [acWordRe]
     # o texto sem a palavra que está sendo digitada
     set text "[$ed get 1.0 $AC(start)]\n[$ed get insert end]"
+    foreach w $::qc::tabs {
+        if {$w ne $ed && $::qc::TB($w,lang) eq $::qc::lang} {
+            append text \n [$w get 1.0 end-1c]
+        }
+    }
     set AC(buf) [acExtract $text $re]
     set AC(kw) [lsort [dict keys $H(words)]]
     set AC(proj) {}
@@ -2595,12 +2627,12 @@ proc qc::zoom {d} {
 
 proc qc::applyWrap {} {
     variable cfg
-    variable ed
+    foreach w $::qc::tabs {
+        $w configure -wrap [expr {$cfg(wrap) ? "word" : "none"}]
+    }
     if {$cfg(wrap)} {
-        $ed configure -wrap word
         grid remove .pw.ed.sx
     } else {
-        $ed configure -wrap none
         grid .pw.ed.sx
     }
     schedGutter
@@ -2974,11 +3006,253 @@ proc qc::optionsApply {} {
 }
 
 # ---------------------------------------------------------------------------
+# Abas
+# ---------------------------------------------------------------------------
+# Cada aba tem o próprio widget text (conteúdo, desfazer, cursor, rolagem,
+# destaque). Só o da aba ativa fica na tela; ::qc::ed e ::qc::_edw apontam
+# para ele, e ::qc::file é o arquivo dele.
+
+proc qc::newEditor {} {
+    variable C
+    variable cfg
+    variable TB
+    variable tabs
+    set w .pw.ed.t[incr ::qc::tabSeq]
+    text $w -background $C(edbg) -foreground $C(edfg) \
+        -insertbackground $C(caret) -insertwidth 2 -selectbackground $C(sel) \
+        -selectforeground {} -inactiveselectbackground $C(sel) \
+        -font QcMono -undo 1 -maxundo 0 -autoseparators 1 \
+        -wrap [expr {$cfg(wrap) ? "word" : "none"}] \
+        -bd 0 -highlightthickness 0 -padx 6 -pady 4 -tabstyle wordprocessor \
+        -yscrollcommand [list qc::edYscroll $w] -xscrollcommand [list qc::edXscroll $w]
+    setupEdTags $w
+    installProxy $w
+    bindtags $w [list $w QcComp QcMulti QcKeys QcEdit Text . all]
+    bind $w <Configure> qc::schedGutter
+    bind $w <<Modified>> [list qc::onModified $w]
+    array set TB [list $w,file "" $w,lang ""]
+    # a nova aba entra logo depois da ativa
+    set i [lsearch -exact $tabs $::qc::ed]
+    set tabs [linsert $tabs [expr {$i + 1}] $w]
+    return $w
+}
+
+proc qc::onModified {w} {
+    if {$w eq $::qc::ed} { updateTitle } else { drawTabs }
+}
+
+proc qc::activateTab {w} {
+    variable ed
+    variable TB
+    variable lang
+    if {$w eq $ed} {
+        focus $w
+        return
+    }
+    if {$ed ne "" && [winfo exists $ed]} {
+        multiClear
+        acHide
+        grid remove $ed
+    }
+    set ed $w
+    interp alias {} ::qc::_edw {} ::qc::raw$w
+    grid $w -in .pw.ed -row 1 -column 1 -sticky nsew
+    variable file $TB($w,file)
+    set want [expr {$TB($w,lang) ne "" ? $TB($w,lang) : $lang}]
+    if {$want ne "" && ($want ne $lang || ![info exists TB($w,hltags)])} {
+        setLang $want
+    } elseif {$lang ne ""} {
+        updateTitle
+    }
+    .pw.ed.sy set {*}[$w yview]
+    .pw.ed.sx set {*}[$w xview]
+    if {[winfo ismapped .pw.ed.find]} { markAll }
+    treeReveal
+    updateCursor
+    focus $w
+}
+
+# Aba para um arquivo novo: reaproveita a ativa se for "Sem título" e vazia.
+proc qc::freshTab {} {
+    variable ed
+    if {$ed ne "" && $::qc::TB($ed,file) eq "" && ![$ed edit modified]
+        && [$ed compare end-1c == 1.0]} {
+        return $ed
+    }
+    set w [newEditor]
+    activateTab $w
+    return $w
+}
+
+proc qc::tabForFile {path} {
+    foreach w $::qc::tabs {
+        if {$path ne "" && $::qc::TB($w,file) eq $path} { return $w }
+    }
+    return ""
+}
+
+# Fecha a aba (perguntando se há alterações). A última aba não some: vira
+# "Sem título".
+proc qc::closeTab {w} {
+    variable tabs
+    variable TB
+    if {![winfo exists $w]} { return 1 }
+    if {[$w edit modified]} {
+        activateTab $w
+        if {![confirmDiscard]} { return 0 }
+    }
+    if {[llength $tabs] == 1} {
+        variable file ""
+        setContent ""
+        set ::qc::status "Arquivo fechado"
+        return 1
+    }
+    set i [lsearch -exact $tabs $w]
+    set tabs [lreplace $tabs $i $i]
+    if {$w eq $::qc::ed} {
+        activateTab [lindex $tabs [expr {min($i, [llength $tabs] - 1)}]]
+    }
+    destroy $w
+    catch {interp alias {} $w {}}
+    array unset TB $w,*
+    drawTabs
+    return 1
+}
+
+proc qc::closeOtherTabs {w} {
+    foreach t $::qc::tabs {
+        if {$t ne $w && ![closeTab $t]} break
+    }
+    if {[winfo exists $w]} { activateTab $w }
+}
+
+# Ctrl+Tab / Ctrl+Shift+Tab (e Ctrl+PgDn / Ctrl+PgUp)
+proc qc::cycleTab {d} {
+    variable tabs
+    set n [llength $tabs]
+    if {$n < 2} return
+    set i [lsearch -exact $tabs $::qc::ed]
+    activateTab [lindex $tabs [expr {($i + $d) % $n}]]
+}
+
+# Link da saída: volta para a aba onde o programa foi executado.
+proc qc::gotoTabLine {w line col} {
+    if {[winfo exists $w]} { activateTab $w }
+    gotoLine $line $col
+}
+
+proc qc::buildTabBar {c} {
+    variable C
+    set h [expr {[font metrics TkDefaultFont -linespace] + 12}]
+    canvas $c -height $h -background $C(trough) -highlightthickness 0 -bd 0 \
+        -xscrollincrement 24
+    bind $c <Configure> qc::drawTabs
+    bind $c <MouseWheel> {%W xview scroll [expr {%D > 0 ? -1 : 1}] units}
+    catch {bind $c <Button-4> {%W xview scroll -1 units}}
+    catch {bind $c <Button-5> {%W xview scroll 1 units}}
+    catch {bind $c <Shift-Button-4> {%W xview scroll -1 units}}
+    catch {bind $c <Shift-Button-5> {%W xview scroll 1 units}}
+    # duplo clique no espaço vazio: novo arquivo
+    bind $c <Double-1> {if {[%W find withtag current] eq ""} qc::newFile}
+
+    set m [menu .tabpop -tearoff 0]
+    $m add command -label "Fechar" -accelerator Ctrl+F4 \
+        -command {qc::closeTab $::qc::tabMenuW}
+    $m add command -label "Fechar as outras" \
+        -command {qc::closeOtherTabs $::qc::tabMenuW}
+    $m add separator
+    $m add command -label "Copiar caminho" -command {
+        set f $::qc::TB($::qc::tabMenuW,file)
+        if {$f ne ""} { clipboard clear; clipboard append $f }
+    }
+}
+
+proc qc::tabMenu {w X Y} {
+    set ::qc::tabMenuW $w
+    .tabpop entryconfigure "Copiar caminho" \
+        -state [expr {$::qc::TB($w,file) eq "" ? "disabled" : "normal"}]
+    tk_popup .tabpop $X $Y
+}
+
+proc qc::drawTabs {} {
+    variable tabs
+    variable TB
+    variable C
+    set c .pw.ed.tabs
+    if {![winfo exists $c]} return
+    $c delete all
+    set h [winfo reqheight $c]
+    # nomes repetidos ganham o nome da pasta
+    set tails {}
+    foreach w $tabs {
+        if {$TB($w,file) ne ""} { dict incr tails [file tail $TB($w,file)] }
+    }
+    set x 0
+    set ax0 0
+    set ax1 0
+    set n 0
+    foreach w $tabs {
+        incr n
+        set f $TB($w,file)
+        set name [expr {$f eq "" ? "Sem título" : [file tail $f]}]
+        if {$f ne "" && [dict get $tails [file tail $f]] > 1} {
+            append name " — [file tail [file dirname $f]]"
+        }
+        set act [expr {$w eq $::qc::ed}]
+        set bg [expr {$act ? $C(edbg) : $C(trough)}]
+        set fg [expr {$act ? "#e0e0e0" : "#8a8a8a"}]
+        set mod [$w edit modified]
+        set cy [expr {$h / 2 + 1}]
+        set tt [$c create text [expr {$x + 12}] $cy -anchor w -text $name \
+            -fill $fg -font TkDefaultFont -tags [list tab$n]]
+        set tx [lindex [$c bbox $tt] 2]
+        set xx [$c create text [expr {$tx + 14}] $cy -anchor center \
+            -text [expr {$mod ? "●" : "×"}] -fill $fg -font TkDefaultFont \
+            -tags [list cls$n]]
+        set x1 [expr {$tx + 26}]
+        $c create rectangle $x 0 $x1 $h -fill $bg -outline "" -tags [list tab$n]
+        $c create line $x1 4 $x1 [expr {$h - 4}] -fill $C(ui)
+        if {$act} {
+            $c create rectangle $x 0 $x1 2 -fill $C(accent) -outline "" -tags [list tab$n]
+            set ax0 $x
+            set ax1 $x1
+        }
+        $c lower tab$n
+        $c raise $tt
+        $c bind tab$n <1> [list qc::activateTab $w]
+        $c bind tab$n <2> [list qc::closeTab $w]
+        $c bind tab$n <3> [list qc::tabMenu $w %X %Y]
+        $c bind tab$n <Enter> [list set ::qc::status [expr {$f eq "" ? "" : $f}]]
+        $c bind cls$n <1> [list qc::closeTab $w]
+        $c bind cls$n <2> [list qc::closeTab $w]
+        $c bind cls$n <Enter> [list $c itemconfigure $xx -text × -fill #ffffff]
+        $c bind cls$n <Leave> [list $c itemconfigure $xx \
+            -text [expr {$mod ? "●" : "×"}] -fill $fg]
+        set x [expr {$x1 + 1}]
+    }
+    # mantém a aba ativa à vista
+    set W [winfo width $c]
+    $c configure -scrollregion [list 0 0 [expr {max($x, $W)}] $h]
+    if {$x <= $W} {
+        $c xview moveto 0
+    } else {
+        set left [expr {[lindex [$c xview] 0] * $x}]
+        if {$ax0 < $left} {
+            $c xview moveto [expr {double($ax0) / $x}]
+        } elseif {$ax1 > $left + $W} {
+            $c xview moveto [expr {double($ax1 - $W) / $x}]
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Arquivos
 # ---------------------------------------------------------------------------
 
 proc qc::updateTitle {} {
     variable file
+    set ::qc::TB($::qc::ed,file) $file
+    drawTabs
     set name [expr {$file eq "" ? "Sem título" : [file tail $file]}]
     set mod [expr {[$::qc::ed edit modified] ? " •" : ""}]
     set dir [expr {$file eq "" ? "" : "  —  [file dirname $file]"}]
@@ -3011,15 +3285,15 @@ proc qc::setContent {data} {
     updateTitle
 }
 
-proc qc::newFile {{force 0}} {
-    if {!$force && ![confirmDiscard]} return
+proc qc::newFile {} {
+    freshTab
     variable file ""
     setContent ""
     set ::qc::status "Novo arquivo ([lget name])"
 }
 
 proc qc::newFromTemplate {label} {
-    if {![confirmDiscard]} return
+    freshTab
     set ver [langVersion]
     variable file ""
     set text [dict get [lget templates] $label]
@@ -3034,10 +3308,7 @@ proc qc::newFromTemplate {label} {
 }
 
 proc qc::closeFile {} {
-    if {![confirmDiscard]} return
-    variable file ""
-    setContent ""
-    set ::qc::status "Arquivo fechado"
+    closeTab $::qc::ed
 }
 
 proc qc::fileTypes {} {
@@ -3065,7 +3336,6 @@ proc qc::langForFile {path} {
 
 proc qc::openFile {{path ""}} {
     variable cfg
-    if {![confirmDiscard]} return
     if {$path eq ""} {
         set opts [list -parent . -title "Abrir" -filetypes [fileTypes]]
         if {$cfg(lastdir) ne "" && [file isdirectory $cfg(lastdir)]} {
@@ -3074,12 +3344,19 @@ proc qc::openFile {{path ""}} {
         set path [tk_getOpenFile {*}$opts]
         if {$path eq ""} return
     }
+    # já aberto: só muda para a aba dele
+    set w [tabForFile [file normalize $path]]
+    if {$w ne ""} {
+        activateTab $w
+        return
+    }
     if {[catch {readFile $path} data]} {
         tk_messageBox -parent . -icon error -title qconsole \
             -message "Não foi possível abrir o arquivo." -detail $data
         return
     }
     if {[string index $data end] eq "\n"} { set data [string range $data 0 end-1] }
+    freshTab
     variable file [file normalize $path]
     set cfg(lastdir) [file dirname $file]
     set id [langForFile $file]
@@ -3113,22 +3390,30 @@ proc qc::saveAs {} {
     return [saveTo [file normalize $path]]
 }
 
-proc qc::saveTo {path} {
+# Salva o editor w (padrão: a aba ativa) em path.
+proc qc::saveTo {path {w ""}} {
     variable ed
     variable cfg
-    set data [$ed get 1.0 end-1c]
+    variable TB
+    if {$w eq ""} { set w $ed }
+    set data [$w get 1.0 end-1c]
     if {$data ne "" && [string index $data end] ne "\n"} { append data \n }
     if {[catch {writeFile $path $data} err]} {
         tk_messageBox -parent . -icon error -title qconsole \
             -message "Não foi possível salvar o arquivo." -detail $err
         return 0
     }
-    variable file $path
+    set TB($w,file) $path
     set cfg(lastdir) [file dirname $path]
-    $ed edit modified 0
+    $w edit modified 0
     addRecent $path
-    updateTitle
-    if {$cfg(folder) ne "" && [string first [file normalize $cfg(folder)]/ $file] == 0} {
+    if {$w eq $ed} {
+        variable file $path
+        updateTitle
+    } else {
+        drawTabs
+    }
+    if {$cfg(folder) ne "" && [string first [file normalize $cfg(folder)]/ $path] == 0} {
         refreshFolder
     }
     set ::qc::status "Salvo: $path"
@@ -3158,7 +3443,20 @@ proc qc::updateRecentMenu {} {
 }
 
 proc qc::quit {} {
-    if {![confirmDiscard]} return
+    variable TB
+    variable cfg
+    foreach w $::qc::tabs {
+        if {[$w edit modified]} {
+            activateTab $w
+            if {![confirmDiscard]} return
+        }
+    }
+    # abas reabertas na próxima vez
+    set cfg(tabs) {}
+    foreach w $::qc::tabs {
+        if {$TB($w,file) ne ""} { lappend cfg(tabs) $TB($w,file) }
+    }
+    set cfg(tabcur) $TB($::qc::ed,file)
     stop
     termKill
     saveCfg
@@ -3303,7 +3601,8 @@ proc qc::run {selOnly} {
         lineoff $lineoff script $script name $name disp $disp nlines $nlines \
         pats $pats col0 [dict get $d col0] infoRe [dict get $d infoRe] \
         warnRe [dict get $d warnRe] grayInfo [dict get $d grayInfo] \
-        killed 0 jumped 0 pend "" sgr {} pid [lindex [pid $fd] 0] proj ""]
+        killed 0 jumped 0 pend "" sgr {} pid [lindex [pid $fd] 0] proj "" \
+        ed $ed]
     fileevent $fd readable [list qc::onStdout $fd]
     fileevent $er readable [list qc::onStderr $er]
 
@@ -3458,13 +3757,13 @@ proc qc::linkify {line tag} {
         conAppend [string range $line $pos $ms-1] $tag
         set lt link[incr linkSeq]
         conAppend $txt [list $tag link $lt]
-        $con tag bind $lt <1> [list qc::gotoLine $target $col]
+        $con tag bind $lt <1> [list qc::gotoTabLine $R(ed) $target $col]
         set pos [expr {$me + 1}]
-        if {$tag eq "stderr"} {
-            ::qc::_edw tag add errline $target.0 "$target.0 lineend +1c"
+        if {$tag eq "stderr" && [winfo exists $R(ed)]} {
+            $R(ed) tag add errline $target.0 "$target.0 lineend +1c"
             if {!$R(jumped)} {
                 set R(jumped) 1
-                $::qc::ed see $target.0
+                $R(ed) see $target.0
             }
         }
     }
@@ -3778,7 +4077,9 @@ proc qc::showShortcuts {} {
         "Ctrl+Shift+O          Abrir pasta"
         "Ctrl+B                Painel de arquivos"
         "Ctrl+' / Ctrl+`       Terminal"
-        "Ctrl+F4               Fechar arquivo"
+        "Ctrl+F4               Fechar aba"
+        "Ctrl+Tab / Ctrl+PgDn  Próxima aba"
+        "Ctrl+Shift+Tab / PgUp Aba anterior"
         "Ctrl+Q                Sair"
         ""
         "Ctrl+Z / Ctrl+Y       Desfazer / Refazer"
@@ -4382,7 +4683,14 @@ proc qc::main {argv} {
     if {$path ne ""} {
         openFile $path
     } else {
-        newFile 1
+        # reabre as abas da última sessão
+        set cur $cfg(tabcur)
+        foreach f $cfg(tabs) {
+            if {[file isfile $f]} { openFile $f }
+        }
+        set w [tabForFile $cur]
+        if {$w ne ""} { activateTab $w }
+        set ::qc::status ""
     }
     applyTerminal
     foreach e $::qc::loadErrors { conAppend "Erro ao carregar linguagem: $e\n" stderr }
