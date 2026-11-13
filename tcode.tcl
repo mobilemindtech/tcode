@@ -657,6 +657,7 @@ proc qc::setupEdTags {ed} {
     $ed tag configure bmatch    -background $C(bmatch) -font QcMonoB
     $ed tag configure bbad      -background $C(bbad)
     $ed tag configure msel      -background $C(sel)
+    $ed tag configure deflink   -underline 1
     $ed tag lower curline
 }
 
@@ -775,8 +776,14 @@ proc qc::setupBindings {} {
     bind QcComp <Configure>       {qc::acHide}
 
     # dica com a definição da palavra sob o mouse
-    bind QcHover <Motion>     {qc::hoverSched %W %x %y}
-    bind QcHover <Leave>      qc::tipHide
+    bind QcHover <Motion>     {qc::hoverSched %W %x %y %s}
+    bind QcHover <Leave>      {qc::tipHide; qc::linkClear}
+    bind QcHover <FocusOut>   qc::linkClear
+    # Ctrl sobre um nome com definição: sublinhado (Ctrl+clique vai até ela)
+    foreach k {Control_L Control_R} {
+        bind QcHover <KeyPress-$k>   {qc::tipHide; qc::linkAtPointer %W}
+        bind QcHover <KeyRelease-$k> qc::linkClear
+    }
     bind QcHover <KeyPress>   qc::tipHide
     bind QcHover <Button>     qc::tipHide
     bind QcHover <MouseWheel> qc::tipHide
@@ -784,7 +791,10 @@ proc qc::setupBindings {} {
     bind QcMulti <KeyPress>          {qc::multiKey %K %A %s}
     bind QcMulti <Button-1>          {qc::multiClear}
     bind QcMulti <Button-2>          {qc::multiClear}
-    bind QcMulti <Control-Button-1>  {qc::addCaretAt %x %y; break}
+    # Ctrl+clique num nome com definição vai até ela; fora disso (ou com
+    # Alt+clique) adiciona um cursor
+    bind QcMulti <Control-Button-1>  {qc::ctrlClick %W %x %y; break}
+    bind QcMulti <Alt-Button-1>      {qc::addCaretAt %x %y; break}
     bind QcMulti <<Paste>>           {if {[llength $::qc::mcur]} {qc::multiApply {qc::paste $::qc::ed}; break}}
 
     bindtags $con [list $con QcKeys Text . all]
@@ -2263,6 +2273,7 @@ namespace eval qc {
     variable navStack {}      ;# posições para o Alt+←
     variable tipAfter ""
     variable tipKey ""
+    variable linkKey ""       ;# palavra sublinhada com Ctrl: {palavra início}
 }
 
 proc qc::defRegexes {id} {
@@ -2444,10 +2455,11 @@ proc qc::defLabel {d} {
     return "[expr {$f eq "" ? "Sem título" : [file tail $f]}]:$line"
 }
 
-proc qc::goToDefinition {} {
+# F12 (idx = insert) ou Ctrl+clique (idx = @x,y).
+proc qc::goToDefinition {{idx insert}} {
     variable ed
     focus $ed
-    set wd [wordAt insert]
+    set wd [wordAt $idx [expr {$idx eq "insert"}]]
     if {![llength $wd]} {
         set ::qc::status "Nenhum nome no cursor"
         return
@@ -2473,7 +2485,7 @@ proc qc::goToDefinition {} {
         if {[string length $txt] > 70} { set txt "[string range $txt 0 68]…" }
         $m add command -label "[defLabel $d]   $txt" -command [list qc::gotoDef $d]
     }
-    set bb [$ed bbox insert]
+    set bb [$ed bbox $a]
     if {![llength $bb]} { set bb {0 0 0 0} }
     tk_popup $m [expr {[winfo rootx $ed] + [lindex $bb 0]}] \
         [expr {[winfo rooty $ed] + [lindex $bb 1] + [lindex $bb 3]}]
@@ -2543,21 +2555,83 @@ proc qc::tipHide {} {
     catch {destroy .tip}
 }
 
-proc qc::hoverSched {w x y} {
+# Palavra sob o mouse ({} se o ponteiro não está sobre texto).
+proc qc::wordUnderMouse {w x y} {
+    if {$w ne $::qc::ed} { return {} }
+    set wd [wordAt @$x,$y 0]
+    if {![llength $wd]} { return {} }
+    # fora do texto (depois do fim da linha) o índice "@x,y" cai no fim
+    set bb [$w bbox [lindex $wd 1]]
+    if {![llength $bb] || $y < [lindex $bb 1] || $y > [lindex $bb 1] + [lindex $bb 3]} {
+        return {}
+    }
+    return $wd
+}
+
+# Definições de uma palavra do editor, fora a própria; {} para palavras-chave,
+# variáveis, strings e comentários.
+proc qc::defsForWord {wd} {
+    lassign $wd name a
+    if {[inLiteral $a]} { return {} }
+    foreach t [$::qc::ed tag names $a] { if {$t in {keyword var}} { return {} } }
+    return [defsElsewhere [findDefs $name] $a]
+}
+
+proc qc::hoverSched {w x y {state 0}} {
     variable tipAfter
     variable tipKey
+    if {$state & 4} { linkUpdate $w $x $y } else { linkClear }
     if {!$::qc::cfg(hoverdef) || $w ne $::qc::ed} return
     after cancel $tipAfter
-    set wd [wordAt @$x,$y 0]
+    set wd [wordUnderMouse $w $x $y]
     set key [lrange $wd 0 1]
     if {$key eq $tipKey && [winfo exists .tip]} return
     catch {destroy .tip}
     set tipKey ""
     if {![llength $wd]} return
-    # fora do texto (depois do fim da linha) o índice "@x,y" cai no fim
-    set bb [$w bbox [lindex $wd 1]]
-    if {![llength $bb] || $y < [lindex $bb 1] || $y > [lindex $bb 1] + [lindex $bb 3]} return
     set tipAfter [after 450 [list qc::tipShow $w $wd $x $y]]
+}
+
+# --- Ctrl+clique ----------------------------------------------------------
+
+proc qc::linkUpdate {w x y} {
+    variable linkKey
+    set wd [wordUnderMouse $w $x $y]
+    set key [lrange $wd 0 1]
+    if {$key eq $linkKey} return
+    linkClear
+    if {![llength $wd] || ![llength [defsForWord $wd]]} return
+    set linkKey $key
+    $w tag add deflink [lindex $wd 1] [lindex $wd 2]
+    $w configure -cursor hand2
+}
+
+proc qc::linkClear {} {
+    variable linkKey
+    if {$linkKey eq ""} return
+    set linkKey ""
+    foreach w $::qc::tabs {
+        $w tag remove deflink 1.0 end
+        $w configure -cursor xterm
+    }
+}
+
+# Ctrl apertado com o mouse já parado sobre o editor.
+proc qc::linkAtPointer {w} {
+    lassign [winfo pointerxy $w] px py
+    if {[winfo containing $px $py] ne $w} return
+    linkUpdate $w [expr {$px - [winfo rootx $w]}] [expr {$py - [winfo rooty $w]}]
+}
+
+proc qc::ctrlClick {w x y} {
+    tipHide
+    set wd [wordUnderMouse $w $x $y]
+    if {[llength $wd] && [llength [defsForWord $wd]]} {
+        linkClear
+        goToDefinition @$x,$y
+    } else {
+        addCaretAt $x $y
+    }
 }
 
 proc qc::tipShow {w wd x y} {
@@ -2565,9 +2639,7 @@ proc qc::tipShow {w wd x y} {
     variable tipKey
     if {$w ne $::qc::ed || ![winfo exists $w]} return
     lassign $wd name a
-    if {[inLiteral $a]} return
-    foreach t [$w tag names $a] { if {$t in {keyword var}} return }
-    set defs [defsElsewhere [findDefs $name] $a]
+    set defs [defsForWord $wd]
     if {![llength $defs]} return
     set tipKey [lrange $wd 0 1]
 
@@ -2963,7 +3035,8 @@ proc qc::addCaretLine {dir} {
     set ::qc::status "[expr {[llength $mcur] + 1}] cursores"
 }
 
-# Ctrl+clique: adiciona um cursor (o principal continua onde estava).
+# Ctrl+clique (fora de um nome com definição) ou Alt+clique: adiciona um
+# cursor (o principal continua onde estava).
 proc qc::addCaretAt {x y} {
     variable ed
     focus $ed
@@ -4486,7 +4559,9 @@ proc qc::showShortcuts {} {
         "F12 / Alt+←           Ir para definição / Voltar"
         "Ctrl+D                Selecionar próxima ocorrência"
         "Alt+F3                Selecionar todas as ocorrências"
-        "Ctrl+Clique           Adicionar cursor"
+        "Ctrl+Clique           Ir para definição (nome sublinhado)"
+        "                      ou adicionar cursor"
+        "Alt+Clique            Adicionar cursor"
         "Shift+Alt+↑ / ↓       Adicionar cursor acima / abaixo"
         "Esc                   Voltar a um cursor"
         "Ctrl+Shift+D          Duplicar linha"

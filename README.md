@@ -24,7 +24,8 @@ pode ser interrompida a qualquer momento.
   próprios); ● marca alterações não salvas, o botão do meio fecha, o botão
   direito tem Fechar / Fechar as outras / Copiar caminho. As abas são
   reabertas na próxima vez
-- Ir para definição (F12, Alt+← volta): procura nas abas abertas e nos
+- Ir para definição (F12 ou Ctrl+clique, Alt+← volta): com Ctrl
+  pressionado, os nomes que têm definição ficam sublinhados. Procura nas abas abertas e nos
   arquivos da pasta aberta; com mais de uma definição, mostra um menu para
   escolher. Ao parar o mouse sobre um nome, uma dica mostra a linha da
   definição e os comentários logo acima dela (Exibir > Mostrar definição ao
@@ -37,7 +38,8 @@ pode ser interrompida a qualquer momento.
 - Fechamento automático de parênteses, colchetes, chaves e aspas; com texto
   selecionado, o par envolve a seleção
 - Vários cursores no estilo Sublime: Ctrl+D seleciona a próxima ocorrência da
-  seleção, Alt+F3 todas, Ctrl+clique ou Shift+Alt+↑/↓ adicionam cursores; o
+  seleção, Alt+F3 todas, Alt+clique, Ctrl+clique (fora de um nome com definição) ou
+  Shift+Alt+↑/↓ adicionam cursores; o
   que for digitado vale para todos
 - Autocompletar (Ctrl+Espaço, ou sozinho ao digitar 3 letras): sugere palavras
   do arquivo aberto, palavras-chave da linguagem e, com uma pasta aberta,
@@ -139,7 +141,8 @@ o interpretador, as opções passadas a ele e os argumentos do programa.
 | F12 / Alt+← | Ir para definição / Voltar |
 | Ctrl+D | Selecionar palavra / próxima ocorrência (vários cursores) |
 | Alt+F3 | Selecionar todas as ocorrências |
-| Ctrl+clique | Adicionar cursor |
+| Ctrl+clique | Ir para definição (com Ctrl, o nome que tem definição fica sublinhado); fora de um nome assim, adicionar cursor |
+| Alt+clique | Adicionar cursor |
 | Shift+Alt+↑ / Shift+Alt+↓ | Adicionar cursor na linha acima / abaixo |
 | Esc | Voltar a um cursor só |
 | Ctrl+Shift+D | Duplicar linha |
