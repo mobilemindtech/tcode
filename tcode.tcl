@@ -53,8 +53,9 @@
 # langDefaults).
 # Hooks opcionais: procs em ::qc::lang::<id>:: -- init, wordTag, prepare,
 # defaultExt, newlineIndent, stderrLine, findExe, reformat (formatador
-# embutido), apiSources, apiParse, defQual (ver as embutidas; as três
-# últimas montam o índice de biblioteca usado na dica e no F12).
+# embutido), run (substitui a execução: Markdown), apiSources, apiParse,
+# defQual (ver as embutidas; as três últimas montam o índice de biblioteca
+# usado na dica e no F12).
 # Tags de cor disponíveis: veja qc::S; "styles" define novas.
 
 package require Tk 8.6-
@@ -105,7 +106,7 @@ namespace eval qc {
         fontsize 12 wrap 0 autoclear 1 recent {} geometry 1100x800
         lastdir "" lang "" folder "" sidebar 0 sidew 240 autocomp 1
         terminal 0 termpos side termcmd "" tabs {} tabcur "" hoverdef 1
-        pretty 1
+        pretty 1 mdpreview 1 mdw 0
     }
     variable T ;# terminal embutido: T(chan), T(pid), T(shown)
     array set T {}
@@ -287,6 +288,7 @@ proc qc::saveCfg {} {
     }
     catch {
         if {".side" in [.hp panes]} {set cfg(sidew) [.hp sashpos 0]}
+        if {".md" in [.hp panes]} {set cfg(mdw) [winfo width .md]}
     }
     set out ""
     foreach k [lsort [array names cfg]] {append out [list $k $cfg($k)] \n}
@@ -424,6 +426,7 @@ proc qc::buildUI {} {
     # Painel lateral (árvore de arquivos) | painéis editor / console
     ttk::panedwindow .hp -orient horizontal
     buildSide
+    buildPreview
     ttk::panedwindow .pw -orient vertical
 
     # editor: barra de abas em cima; cada aba é um widget text (ver newEditor)
@@ -517,6 +520,8 @@ proc qc::buildMenus {} {
     $m add separator
     $m add command -label "Salvar" -accelerator Ctrl+S -command qc::save
     $m add command -label "Salvar como…" -accelerator Ctrl+Shift+S -command qc::saveAs
+    $m add command -label "Exportar para HTML…" -accelerator Ctrl+Shift+E -command qc::mdExport
+    $m add command -label "Abrir no navegador" -command qc::mdBrowser
     $m add command -label "Fechar aba" -accelerator Ctrl+F4 -command qc::closeFile
     $m add command -label "Próxima aba" -accelerator Ctrl+Tab -command {qc::cycleTab 1}
     $m add command -label "Aba anterior" -accelerator Ctrl+Shift+Tab -command {qc::cycleTab -1}
@@ -592,6 +597,8 @@ proc qc::buildMenus {} {
         -variable ::qc::cfg(pretty) -command qc::highlight
     $m add checkbutton -label "Painel de arquivos" -accelerator Ctrl+B \
         -variable ::qc::cfg(sidebar) -command qc::applySide
+    $m add checkbutton -label "Pré-visualização do Markdown" -accelerator Ctrl+Shift+M \
+        -variable ::qc::cfg(mdpreview) -command qc::mdApply
     $m add separator
     $m add checkbutton -label "Terminal" -accelerator Ctrl+' \
         -variable ::qc::cfg(terminal) -command qc::applyTerminal
@@ -733,6 +740,8 @@ proc qc::setupBindings {} {
         <Control-R>         {qc::run 1}
         <Control-O>         qc::openFolder
         <Control-b>         qc::toggleSide
+        <Control-M>         qc::mdToggle
+        <Control-E>         qc::mdExport
         <Control-apostrophe> qc::toggleTerminal
         <Control-grave>     qc::toggleTerminal
         <Control-Break>     qc::stop
@@ -1305,6 +1314,7 @@ proc qc::setLang {id} {
     detectVersion
     # índice de biblioteca da linguagem (dica/F12), em segundo plano
     if {$cfg(hoverdef)} {apiStart $id}
+    mdApply
 }
 
 # Monta a regex única da linguagem: cada token vira um grupo; um token com
@@ -1520,6 +1530,7 @@ proc qc::edYscroll {w args} {
     if {$w ne $::qc::ed} {return}
     .pw.ed.sy set {*}$args
     schedGutter
+    mdSync
     if {[llength $::qc::mcur]} {after idle {qc::drawCarets}}
 }
 
@@ -1580,6 +1591,7 @@ proc qc::onChange {} {
     ::qc::_edw tag remove errline 1.0 end
     ::qc::_edw tag remove warnline 1.0 end
     schedHighlight
+    mdSched
     schedGutter
     onCursor
 }
@@ -1876,7 +1888,12 @@ proc qc::newline {} {
     catch {$ed delete sel.first sel.last}
     set h [hook newlineIndent]
     if {$h ne ""} {
-        $ed insert insert "\n[$h]"
+        # o hook pode tratar o Enter sozinho (return -code break)
+        if {[catch {$h} ind] == 3} {
+            $ed see insert
+            return
+        }
+        $ed insert insert "\n$ind"
         $ed see insert
         return
     }
@@ -3483,6 +3500,7 @@ proc qc::zoom {d} {
         set cfg(fontsize) [expr {max(6, min(48, $cfg(fontsize) + $d))}]
     }
     foreach f {QcMono QcMonoB QcMonoI} {font configure $f -size $cfg(fontsize)}
+    mdZoom
     updateTabs
     schedGutter
     set ::qc::status "Fonte: $cfg(fontsize) pt"
@@ -3729,7 +3747,10 @@ proc qc::detectVersion {} {
     variable V
     variable lang
     set rn [currentRunner]
-    if {$rn eq ""} {set ::qc::interp "sem interpretador"; return}
+    if {$rn eq ""} {
+        set ::qc::interp [expr {[hook run] ne "" ? "Ctrl+R: pré-visualizar" : "sem interpretador"}]
+        return
+    }
     set key $lang,[dict get $rn name]
     set exe [findExe $rn]
     if {$exe eq ""} {
@@ -3937,6 +3958,7 @@ proc qc::activateTab {w} {
     if {[winfo ismapped .pw.ed.find]} {markAll}
     treeReveal
     updateCursor
+    mdApply
     focus $w
 }
 
@@ -4465,6 +4487,12 @@ proc qc::run {selOnly} {
     variable cfg
     variable file
     variable lang
+    # linguagens sem execução própria (ex.: Markdown: pré-visualizar)
+    set h [hook run]
+    if {$h ne ""} {
+        $h $selOnly
+        return
+    }
     if {[info exists R(fd)]} {
         set ::qc::status "Já existe uma execução em andamento (Ctrl+Break para interromper)"
         return
@@ -5517,6 +5545,8 @@ proc qc::showShortcuts {} {
         "Ctrl+Shift+S          Salvar como"
         "Ctrl+Shift+O          Abrir pasta"
         "Ctrl+B                Painel de arquivos"
+        "Ctrl+Shift+M          Pré-visualização do Markdown"
+        "Ctrl+Shift+E          Exportar Markdown para HTML"
         "Ctrl+' / Ctrl+`       Terminal"
         "Ctrl+F4               Fechar aba"
         "Ctrl+Tab / Ctrl+PgDn  Próxima aba"
@@ -5559,6 +5589,1643 @@ proc qc::about {} {
         append detail "\n\nErros ao carregar linguagens:\n[join $::qc::loadErrors \n]"
     }
     tk_messageBox -parent . -title "Sobre" -message "qconsole $::qc::version" -detail $detail
+}
+
+# ---------------------------------------------------------------------------
+# Markdown: leitura (parser), pré-visualização e exportação para HTML
+# ---------------------------------------------------------------------------
+# qc::md::parse converte o texto em uma lista de blocos; a mesma árvore é
+# desenhada no painel de pré-visualização (qc::mdRender, widget text) e
+# convertida em HTML (qc::md::toHtml). Cobre o CommonMark usual e as
+# extensões do GitHub mais comuns: tabelas, ~~riscado~~, listas de tarefas
+# e links automáticos.
+#
+# Blocos: {h linha nível inlines slug}  {p linha inlines}
+#         {code linha linguagem texto}  {quote linha blocos}
+#         {list linha ordenada início compacta itens}  (item: {tarefa blocos},
+#          tarefa = "" | 0 | 1)
+#         {hr linha}  {table linha alinhamentos cabeçalho linhas}
+#         {html linha texto}
+# Inlines: {t texto} {code texto} {em ...} {strong ...} {del ...}
+#          {link href título inlines} {img src alt título} {br} {html texto}
+# "linha" é a linha do fonte (1 = primeira), usada para sincronizar a
+# rolagem do editor com a pré-visualização.
+
+namespace eval qc::md {
+    variable refs {} ;# definições [id]: url "título"
+    variable slugs {} ;# ids dos títulos já usados (para âncoras únicas)
+    variable punct {!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~}
+    # tags que começam um bloco HTML
+    variable blockTags [join {
+        address article aside blockquote center details dialog dd div dl dt
+        fieldset figcaption figure footer form h[1-6] header hr iframe li main
+        nav ol p pre section summary table tbody td tfoot th thead tr ul video
+        audio picture script style
+    } |]
+}
+
+proc qc::md::parse {text} {
+    variable refs
+    variable slugs
+    set refs [dict create]
+    set slugs [dict create]
+    set lines [split [string map [list \r\n \n \r \n \t "    "] $text] \n]
+    set defRe {^ {0,3}\[([^\]]+)\]:[ \t]*<?([^\s>]+)>?}
+    append defRe {(?:[ \t]+(?:"([^"]*)"|'([^']*)'|\(([^)]*)\)))?[ \t]*$}
+    # pré-passo: definições de referência (fora de blocos de código); a
+    # linha vira branca para manter a numeração
+    set fence ""
+    set out {}
+    foreach ln $lines {
+        if {$fence ne ""} {
+            if {[regexp -- $fence $ln]} {set fence ""}
+        } elseif {[regexp {^ {0,3}(`{3,}|~{3,})} $ln -> f]} {
+            set fence "^ {0,3}[string repeat [string index $f 0] [string length $f]]"
+        } elseif {[regexp $defRe $ln -> id href t1 t2 t3]} {
+            set key [norm $id]
+            if {![dict exists $refs $key]} {
+                dict set refs $key [list [unescape $href] "$t1$t2$t3"]
+            }
+            set ln ""
+        }
+        lappend out $ln
+    }
+    return [blocks $out 1]
+}
+
+proc qc::md::norm {label} {
+    return [string tolower [regsub -all {\s+} [string trim $label] " "]]
+}
+
+proc qc::md::unescape {s} {
+    return [regsub -all {\\([[:punct:]])} $s {\1}]
+}
+
+proc qc::md::blank {ln} {
+    return [expr {[string trim $ln] eq ""}]
+}
+
+# Marcador de lista: {recuo marcador espaços resto} ou "".
+proc qc::md::listMarker {ln} {
+    if {[regexp {^( {0,3})([-*+]|[0-9]{1,9}[.)])(?:([ ]+)(.*))?$} $ln -> ind mk sp rest]} {
+        return [list $ind $mk $sp $rest]
+    }
+    return ""
+}
+
+# Mesmo tipo de lista: mesmo marcador (-, *, +) ou mesmo delimitador (. ou )).
+proc qc::md::sameList {a b} {
+    set oa [string is digit [string index $a 0]]
+    set ob [string is digit [string index $b 0]]
+    if {$oa != $ob} {return 0}
+    return [expr {[string index $a end] eq [string index $b end]}]
+}
+
+# A linha começa um bloco que interrompe um parágrafo?
+proc qc::md::startsBlock {ln} {
+    variable blockTags
+    if {[regexp {^ {0,3}(?:`{3,}|~{3,}|#{1,6}(?:[ \t]|$)|>)} $ln]} {return 1}
+    if {[regexp {^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$} $ln]} {return 1}
+    set m [listMarker $ln]
+    if {$m ne "" && [string trim [lindex $m 3]] ne ""} {return 1}
+    if {[regexp -nocase "^ {0,3}<(?:/?(?:$blockTags)(?:\[\\s/>\]|\$)|!--)" $ln]} {return 1}
+    return 0
+}
+
+proc qc::md::isHr {ln} {
+    return [regexp {^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$} $ln]
+}
+
+proc qc::md::slug {inl} {
+    variable slugs
+    set s [string tolower [plain $inl]]
+    set s [regsub -all {[^[:alnum:] _-]} $s ""]
+    set s [regsub -all { } [string trim $s] -]
+    if {$s eq ""} {set s secao}
+    set base $s
+    set k 0
+    while {[dict exists $slugs $s]} {set s $base-[incr k]}
+    dict set slugs $s 1
+    return $s
+}
+
+# Linhas -> blocos. base = número (no fonte) da primeira linha.
+proc qc::md::blocks {lines base} {
+    variable blockTags
+    set out {}
+    set n [llength $lines]
+    set i 0
+    while {$i < $n} {
+        set ln [lindex $lines $i]
+        set L [expr {$base + $i}]
+        if {[blank $ln]} {incr i; continue}
+
+        # bloco cercado ``` / ~~~
+        if {[regexp {^( {0,3})(`{3,}|~{3,})([^`]*)$} $ln -> ind f info]} {
+            set close "^ {0,3}[string repeat [string index $f 0] [string length $f]]\[[string index $f 0]\]*\[ \t\]*\$"
+            set body {}
+            set strip [string length $ind]
+            incr i
+            while {$i < $n && ![regexp -- $close [lindex $lines $i]]} {
+                set l [lindex $lines $i]
+                if {$strip} {regsub "^ {0,$strip}" $l "" l}
+                lappend body $l
+                incr i
+            }
+            incr i
+            lappend out [list code $L [lindex [regexp -inline {\S+} $info] 0] [join $body \n]]
+            continue
+        }
+
+        # código indentado (4 espaços)
+        if {[string match "    *" $ln]} {
+            set body {}
+            while {$i < $n} {
+                set l [lindex $lines $i]
+                if {[string match "    *" $l]} {
+                    lappend body [string range $l 4 end]
+                } elseif {[blank $l]} {
+                    lappend body ""
+                } else {
+                    break
+                }
+                incr i
+            }
+            while {[llength $body] && [blank [lindex $body end]]} {set body [lrange $body 0 end-1]}
+            lappend out [list code $L "" [join $body \n]]
+            continue
+        }
+
+        # título # ... ######
+        if {[regexp {^ {0,3}(#{1,6})(?:[ \t]+(.*))?$} $ln -> h t]} {
+            set t [string trim [regsub {(?:^|[ \t]+)#+[ \t]*$} $t ""]]
+            set inl [inl $t]
+            lappend out [list h $L [string length $h] $inl [slug $inl]]
+            incr i
+            continue
+        }
+
+        # linha horizontal
+        if {[isHr $ln]} {
+            lappend out [list hr $L]
+            incr i
+            continue
+        }
+
+        # tabela (cabeçalho | ... seguido de |---|:---:|)
+        if {
+            [string first | $ln] >= 0 && $i + 1 < $n
+            && [string first | [lindex $lines $i+1]] >= 0
+            && [regexp {^ {0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$} [lindex $lines $i+1]]
+        } {
+            set head [splitRow $ln]
+            set aligns {}
+            foreach c [splitRow [lindex $lines $i+1]] {
+                set c [string trim $c]
+                set l [string match :* $c]
+                set r [string match *: $c]
+                lappend aligns [expr {$l && $r ? "center" : ($r ? "right" : ($l ? "left" : ""))}]
+            }
+            if {[llength $aligns] == [llength $head]} {
+                set nc [llength $head]
+                set rows {}
+                incr i 2
+                while {$i < $n} {
+                    set l [lindex $lines $i]
+                    if {[blank $l] || [string first | $l] < 0 || [startsBlock $l]} {break}
+                    set cells [lrange [concat [splitRow $l] [lrepeat $nc ""]] 0 $nc-1]
+                    lappend rows [lmap c $cells {inl [string trim $c]}]
+                    incr i
+                }
+                lappend out [list table $L $aligns [lmap c $head {inl [string trim $c]}] $rows]
+                continue
+            }
+        }
+
+        # citação
+        if {[regexp {^ {0,3}>} $ln]} {
+            set sub {}
+            while {$i < $n} {
+                set l [lindex $lines $i]
+                if {[regexp {^ {0,3}> ?(.*)$} $l -> r]} {
+                    lappend sub $r
+                } elseif {
+                    ![blank $l] && [llength $sub] && ![blank [lindex $sub end]]
+                    && ![startsBlock $l] && ![isHr $l]
+                } {
+                    lappend sub $l ;# continuação "preguiçosa"
+                } else {
+                    break
+                }
+                incr i
+            }
+            lappend out [list quote $L [blocks $sub $L]]
+            continue
+        }
+
+        # lista
+        set m [listMarker $ln]
+        if {$m ne ""} {
+            lassign $m - mk0
+            set ordered [string is digit [string index $mk0 0]]
+            set start [expr {$ordered ? [scan [string range $mk0 0 end-1] %d] : 1}]
+            set items {}
+            set tight 1
+            while {$i < $n} {
+                set m [listMarker [lindex $lines $i]]
+                if {$m eq "" || ![sameList $mk0 [lindex $m 1]]} {break}
+                lassign $m ind mk sp rest
+                set Li [expr {$base + $i}]
+                set W [expr {[string length $ind] + [string length $mk] + 1}]
+                if {$rest ne "" && [string length $sp] <= 4} {
+                    incr W [expr {[string length $sp] - 1}]
+                } elseif {$rest ne ""} {
+                    set rest "[string repeat " " [expr {[string length $sp] - 1}]]$rest"
+                }
+                set task ""
+                if {[regexp {^\[([ xX])\](?:[ ]+(.*))?$} $rest -> x r2]} {
+                    set task [expr {$x ne " "}]
+                    set rest $r2
+                }
+                set sub [list $rest]
+                incr i
+                while {$i < $n} {
+                    set l [lindex $lines $i]
+                    if {[blank $l]} {
+                        lappend sub ""
+                    } elseif {[regexp {^ *} $l sp2] && [string length $sp2] >= $W} {
+                        lappend sub [string range $l $W end]
+                    } elseif {
+                        ![blank [lindex $sub end]] && ![startsBlock $l] && ![isHr $l]
+                        && [listMarker $l] eq ""
+                    } {
+                        lappend sub [string trimleft $l] ;# continuação "preguiçosa"
+                    } else {
+                        break
+                    }
+                    incr i
+                }
+                set trail 0
+                while {[llength $sub] > 1 && [blank [lindex $sub end]]} {
+                    set sub [lrange $sub 0 end-1]
+                    incr trail
+                }
+                # linha em branco entre blocos do próprio item: lista "solta"
+                for {set k 1} {$k < [llength $sub] - 1} {incr k} {
+                    if {[blank [lindex $sub $k]] && ![string match " *" [lindex $sub $k+1]]} {
+                        set tight 0
+                    }
+                }
+                lappend items [list $task [blocks $sub $Li]]
+                if {$trail && $i < $n} {
+                    set m2 [listMarker [lindex $lines $i]]
+                    if {$m2 ne "" && [sameList $mk0 [lindex $m2 1]]} {set tight 0}
+                }
+            }
+            lappend out [list list $L $ordered $start $tight $items]
+            continue
+        }
+
+        # bloco HTML: até a próxima linha em branco
+        if {[regexp -nocase "^ {0,3}<(?:/?(?:$blockTags)(?:\[\\s/>\]|\$)|!--)" $ln]} {
+            set body {}
+            while {$i < $n && ![blank [lindex $lines $i]]} {
+                lappend body [lindex $lines $i]
+                incr i
+            }
+            lappend out [list html $L [join $body \n]]
+            continue
+        }
+
+        # parágrafo (ou título sublinhado com === / ---)
+        set para [list [string trimleft $ln]]
+        set level 0
+        incr i
+        while {$i < $n} {
+            set l [lindex $lines $i]
+            if {[blank $l]} {break}
+            if {[regexp {^ {0,3}(=+|-+)[ \t]*$} $l -> u]} {
+                set level [expr {[string index $u 0] eq "=" ? 1 : 2}]
+                incr i
+                break
+            }
+            if {[startsBlock $l] || [isHr $l]} {break}
+            lappend para [string trimleft $l]
+            incr i
+        }
+        set text [join $para \n]
+        if {$level} {
+            set inl [inl [string trim $text]]
+            lappend out [list h $L $level $inl [slug $inl]]
+        } else {
+            lappend out [list p $L [inl [string trimright $text]]]
+        }
+    }
+    return $out
+}
+
+# Células de uma linha de tabela (| a | b |); \| é um | literal.
+proc qc::md::splitRow {ln} {
+    set ln [string trim $ln]
+    if {[string index $ln 0] eq "|"} {set ln [string range $ln 1 end]}
+    if {[string index $ln end] eq "|" && [string index $ln end-1] ne "\\"} {
+        set ln [string range $ln 0 end-1]
+    }
+    set cells {}
+    set cur ""
+    set tick 0
+    set n [string length $ln]
+    for {set i 0} {$i < $n} {incr i} {
+        set c [string index $ln $i]
+        if {$c eq "\\" && [string index $ln $i+1] eq "|"} {
+            append cur |
+            incr i
+        } elseif {$c eq "`"} {
+            set tick [expr {!$tick}]
+            append cur $c
+        } elseif {$c eq "|" && !$tick} {
+            lappend cells $cur
+            set cur ""
+        } else {
+            append cur $c
+        }
+    }
+    lappend cells $cur
+    return $cells
+}
+
+# --- inlines ---------------------------------------------------------------
+
+proc qc::md::inl {s} {
+    variable punct
+    set out {}
+    set buf ""
+    set n [string length $s]
+    set i 0
+    while {$i < $n} {
+        if {![regexp -start $i -indices {[\\`*_~\[!<\nh&]} $s r]} {
+            append buf [string range $s $i end]
+            break
+        }
+        set j [lindex $r 0]
+        append buf [string range $s $i $j-1]
+        set i $j
+        set c [string index $s $i]
+        switch -- $c {
+            "\\" {
+                set d [string index $s $i+1]
+                if {$d eq "\n"} {
+                    emit out buf
+                    lappend out br
+                    incr i 2
+                } elseif {$d ne "" && [string first $d $punct] >= 0} {
+                    append buf $d
+                    incr i 2
+                } else {
+                    append buf "\\"
+                    incr i
+                }
+            }
+            "\n" {
+                if {[regexp {  +$} $buf]} {
+                    set buf [string trimright $buf " "]
+                    emit out buf
+                    lappend out br
+                } else {
+                    set buf "[string trimright $buf " "]\n"
+                }
+                incr i
+                while {[string index $s $i] eq " "} {incr i}
+            }
+            "`" {
+                set k $i
+                while {[string index $s $k] eq "`"} {incr k}
+                set run [expr {$k - $i}]
+                set tick [string repeat ` $run]
+                set p $k
+                set found -1
+                while {[set q [string first $tick $s $p]] >= 0} {
+                    set e $q
+                    while {[string index $s $e] eq "`"} {incr e}
+                    if {$e - $q == $run} {set found $q; break}
+                    set p $e
+                }
+                if {$found < 0} {
+                    append buf $tick
+                    set i $k
+                    continue
+                }
+                set code [string map {\n " "} [string range $s $k $found-1]]
+                if {[regexp {^ .*[^ ].* $} $code]} {set code [string range $code 1 end-1]}
+                emit out buf
+                lappend out [list code $code]
+                set i [expr {$found + $run}]
+            }
+            "*" - "_" - "~" {
+                set k $i
+                while {[string index $s $k] eq $c} {incr k}
+                set run [expr {$k - $i}]
+                set prev [string index $s $i-1]
+                set next [string index $s $k]
+                set ok [expr {$next ne "" && ![string is space $next]}]
+                if {$c eq "_" && $prev ne "" && [string is alnum $prev]} {set ok 0}
+                if {$c eq "~" && $run != 2} {set ok 0}
+                set done 0
+                if {$ok} {
+                    if {$c eq "~"} {
+                        set tries {2}
+                    } elseif {$run >= 3} {
+                        set tries {3 2 1}
+                    } elseif {$run == 2} {
+                        set tries {2 1}
+                    } else {
+                        set tries {1}
+                    }
+                    foreach len $tries {
+                        set from [expr {$k}]
+                        set q [findClose $s $from $c $len 0]
+                        if {$q < 0} {continue}
+                        set inner [inl [string range $s $from $q-1]]
+                        append buf [string range $s $i [expr {$k - $len - 1}]]
+                        emit out buf
+                        switch -- $len {
+                            3 {lappend out [list strong [list em {*}$inner]]}
+                            2 {lappend out [list [expr {$c eq "~" ? "del" : "strong"}] {*}$inner]}
+                            1 {lappend out [list em {*}$inner]}
+                        }
+                        set i [expr {$q + $len}]
+                        set done 1
+                        break
+                    }
+                }
+                if {!$done} {
+                    append buf [string range $s $i $k-1]
+                    set i $k
+                }
+            }
+            "!" - "\[" {
+                set img [expr {$c eq "!"}]
+                if {$img && [string index $s $i+1] ne "\["} {
+                    append buf !
+                    incr i
+                    continue
+                }
+                set lk [linkAt $s [expr {$i + $img}]]
+                if {$lk eq ""} {
+                    append buf $c
+                    incr i
+                    continue
+                }
+                lassign $lk end text href title
+                emit out buf
+                if {$img} {
+                    lappend out [list img $href [plain [inl $text]] $title]
+                } else {
+                    lappend out [list link $href $title {*}[inl $text]]
+                }
+                set i $end
+            }
+            "<" {
+                set rest [string range $s $i end]
+                if {[regexp {^<((?:https?|ftp|mailto|file):[^\s<>]*)>} $rest all u]} {
+                    emit out buf
+                    lappend out [list link $u "" [list t $u]]
+                    incr i [string length $all]
+                } elseif {[regexp {^<([^\s<>@]+@[^\s<>@]+\.[^\s<>@]+)>} $rest all u]} {
+                    emit out buf
+                    lappend out [list link mailto:$u "" [list t $u]]
+                    incr i [string length $all]
+                } elseif {[regexp {^<(?:/?[A-Za-z][A-Za-z0-9-]*(?:\s+[^<>]*)?/?|!--(?:[^-]|-[^-])*--)>} $rest all]} {
+                    emit out buf
+                    lappend out [list html $all]
+                    incr i [string length $all]
+                } else {
+                    append buf <
+                    incr i
+                }
+            }
+            "h" {
+                set prev [string index $s $i-1]
+                if {
+                    ($prev eq "" || ![string is alnum $prev])
+                    && [regexp {^https?://[^\s<>]+} [string range $s $i end] u]
+                } {
+                    set u [regsub {[.,;:!?'"*_~]+$} $u ""]
+                    while {
+                        [string index $u end] eq ")"
+                        && [regexp -all {\)} $u] > [regexp -all {\(} $u]
+                    } {
+                        set u [string range $u 0 end-1]
+                    }
+                    emit out buf
+                    lappend out [list link $u "" [list t $u]]
+                    incr i [string length $u]
+                } else {
+                    append buf h
+                    incr i
+                }
+            }
+            "&" {
+                if {[regexp {^&(?:[A-Za-z][A-Za-z0-9]*|#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6});} \
+                        [string range $s $i end] ent]} {
+                    append buf [entity $ent]
+                    incr i [string length $ent]
+                } else {
+                    append buf &
+                    incr i
+                }
+            }
+        }
+    }
+    emit out buf
+    return $out
+}
+
+proc qc::md::emit {outVar bufVar} {
+    upvar 1 $outVar out $bufVar buf
+    if {$buf ne ""} {
+        lappend out [list t $buf]
+        set buf ""
+    }
+}
+
+# Entidade HTML -> caractere (as desconhecidas ficam como estão).
+proc qc::md::entity {e} {
+    set map {
+        &amp; & &lt; < &gt; > &quot; \" &apos; ' &nbsp;   &copy; ©
+        &reg; ® &trade; ™ &mdash; — &ndash; – &hellip; …
+        &laquo; « &raquo; » &larr; ← &rarr; → &uarr; ↑
+        &darr; ↓ &times; × &deg; ° &middot; · &bull; •
+        &euro; € &check; ✓
+    }
+    if {[dict exists $map $e]} {return [dict get $map $e]}
+    if {[regexp {^&#[xX]([0-9a-fA-F]+);$} $e -> h]} {
+        scan $h %x v
+    } elseif {![regexp {^&#([0-9]+);$} $e -> v]} {
+        return $e
+    }
+    set v [scan $v %d]
+    if {$v <= 0 || $v > 0x10FFFF} {return �}
+    return [format %c $v]
+}
+
+# Fecho de uma ênfase com "len" caracteres c, a partir de "from". Aberturas
+# no meio (ex.: o ** de "*a **b** c*") são puladas junto com o fecho delas.
+proc qc::md::findClose {s from c len depth} {
+    if {$depth > 20} {return -1}
+    set p $from
+    set n [string length $s]
+    while {$p < $n} {
+        set q [string first $c $s $p]
+        if {$q < 0} {return -1}
+        # pula código inline e escapes
+        set k [string first ` $s $p]
+        if {$k >= 0 && $k < $q} {
+            set e $k
+            while {[string index $s $e] eq "`"} {incr e}
+            set q2 [string first [string range $s $k $e-1] $s $e]
+            set p [expr {$q2 >= 0 ? $q2 + ($e - $k) : $e}]
+            continue
+        }
+        if {[string index $s $q-1] eq "\\"} {
+            set p [expr {$q + 1}]
+            continue
+        }
+        set e $q
+        while {[string index $s $e] eq $c} {incr e}
+        set run [expr {$e - $q}]
+        set before [string index $s $q-1]
+        set after [string index $s $e]
+        set canClose [expr {$q > $from && ![string is space $before]}]
+        if {$c eq "_" && $after ne "" && [string is alnum $after]} {set canClose 0}
+        if {$canClose && ($run == $len || ($run == 3 && $c ne "~"))} {return $q}
+        set canOpen [expr {$after ne "" && ![string is space $after]}]
+        if {$c eq "_" && [string is alnum $before]} {set canOpen 0}
+        if {$canOpen && !$canClose && $c ne "~" || $canOpen && $c eq "~" && $run == 2 && !$canClose} {
+            # abertura interna: pula até o fecho dela
+            set q2 [findClose $s $e $c [expr {min($run, 2)}] [expr {$depth + 1}]]
+            if {$q2 >= 0} {
+                set p [expr {$q2 + min($run, 2)}]
+                continue
+            }
+        }
+        set p $e
+    }
+    return -1
+}
+
+# [texto](destino "título"), [texto][ref], [texto][] ou [texto] em s[i].
+# Retorna {fim texto href título} ou "".
+proc qc::md::linkAt {s i} {
+    variable refs
+    set n [string length $s]
+    set depth 0
+    for {set j $i} {$j < $n} {incr j} {
+        set ch [string index $s $j]
+        if {$ch eq "\\"} {
+            incr j
+        } elseif {$ch eq "`"} {
+            set e $j
+            while {[string index $s $e] eq "`"} {incr e}
+            set q [string first [string range $s $j $e-1] $s $e]
+            if {$q >= 0} {set j [expr {$q + ($e - $j) - 1}]}
+        } elseif {$ch eq "\["} {
+            incr depth
+        } elseif {$ch eq "\]"} {
+            incr depth -1
+            if {$depth == 0} {break}
+        }
+    }
+    if {$j >= $n} {return ""}
+    set text [string range $s $i+1 $j-1]
+    set k [expr {$j + 1}]
+    if {[string index $s $k] eq "("} {
+        set d 0
+        for {set m $k} {$m < $n} {incr m} {
+            set ch [string index $s $m]
+            if {$ch eq "\\"} {
+                incr m
+            } elseif {$ch eq "("} {
+                incr d
+            } elseif {$ch eq ")"} {
+                incr d -1
+                if {$d == 0} {break}
+            }
+        }
+        if {$m < $n} {
+            set inside [string trim [string range $s $k+1 $m-1]]
+            if {
+                [regexp {^<([^>]*)>(?:\s+(.*))?$} $inside -> href rest]
+                || [regexp {^(\S*)(?:\s+(.*))?$} $inside -> href rest]
+            } {
+                set title ""
+                regexp {^["'(](.*)["')]$} [string trim $rest] -> title
+                return [list [expr {$m + 1}] $text [unescape $href] $title]
+            }
+        }
+    }
+    set key $text
+    set end $k
+    if {[regexp {^\[([^\]]*)\]} [string range $s $k end] all id]} {
+        if {$id ne ""} {set key $id}
+        set end [expr {$k + [string length $all]}]
+    }
+    set key [norm $key]
+    if {$key ne "" && [dict exists $refs $key]} {
+        lassign [dict get $refs $key] href title
+        return [list $end $text $href $title]
+    }
+    return ""
+}
+
+# Texto puro de uma lista de inlines.
+proc qc::md::plain {nodes} {
+    set out ""
+    foreach nd $nodes {
+        switch -- [lindex $nd 0] {
+            t - code {append out [lindex $nd 1]}
+            br {append out " "}
+            em - strong - del {append out [plain [lrange $nd 1 end]]}
+            link {append out [plain [lrange $nd 3 end]]}
+            img {append out [lindex $nd 2]}
+        }
+    }
+    return $out
+}
+
+# --- destaque de sintaxe em blocos de código ---------------------------------
+# Usa os tokens da linguagem do tcode indicada na cerca (```tcl, ```scheme,
+# ```sh...). Retorna {tag início fim} (deslocamentos de caractere, fim
+# exclusivo) e o dicionário de estilos.
+
+proc qc::md::langId {info} {
+    set info [string tolower $info]
+    if {$info eq ""} {return ""}
+    if {$info in $::qc::langs} {return $info}
+    set alias {console shell shell shell bash shell zsh shell guile scheme
+               racket scheme lisp scheme ml ocaml tk tcl sc scala}
+    if {[dict exists $alias $info] && [dict get $alias $info] in $::qc::langs} {
+        return [dict get $alias $info]
+    }
+    foreach id $::qc::langs {
+        if {".$info" in [::qc::lget ext $id]} {return $id}
+    }
+    return ""
+}
+
+proc qc::md::hlSpec {id} {
+    variable HS
+    if {[info exists HS($id)]} {return $HS($id)}
+    if {$id ni $::qc::inited} {
+        lappend ::qc::inited $id
+        set h [::qc::hook init $id]
+        if {$h ne ""} {catch {$h}}
+    }
+    set d [::qc::ldict $id]
+    set parts {}
+    set specs {}
+    set g 1
+    foreach {tag re} [dict get $d tokens] {
+        if {[catch {regexp -about $re} ab]} {continue}
+        set n [lindex $ab 0]
+        lappend parts "($re)"
+        lappend specs [list $tag $g [expr {$n > 0}]]
+        incr g [expr {$n + 1}]
+    }
+    set words [dict create]
+    dict for {tag list} [dict get $d words] {
+        foreach w $list {dict set words $w $tag}
+    }
+    set HS($id) [dict create re "(?w)[join $parts |]" specs $specs nf $g \
+        words $words defWords [dict get $d defWords] defTag [dict get $d defTag] \
+        capType [dict get $d capType] numRe [dict get $d numberWord] \
+        styles [dict merge $::qc::S [dict get $d styles]]]
+    return $HS($id)
+}
+
+proc qc::md::hlCode {id text} {
+    if {$id eq "" || $id eq "markdown"} {return {}}
+    set H [hlSpec $id]
+    if {[dict get $H specs] eq ""} {return {}}
+    set nf [dict get $H nf]
+    set words [dict get $H words]
+    set out {}
+    set defNext 0
+    set m [regexp -all -inline -indices -- [dict get $H re] $text]
+    for {set i 0} {$i < [llength $m]} {incr i $nf} {
+        set tag ""
+        foreach spec [dict get $H specs] {
+            lassign $spec t g inner
+            set r [lindex $m [expr {$i + $g}]]
+            if {[lindex $r 0] < 0} {continue}
+            set tag $t
+            if {$inner} {
+                set r2 [lindex $m [expr {$i + $g + 1}]]
+                if {[lindex $r2 0] >= 0} {set r $r2}
+            }
+            break
+        }
+        if {$tag eq ""} {continue}
+        lassign $r a z
+        if {$tag eq "word"} {
+            set w [string range $text $a $z]
+            if {[dict get $H numRe] ne "" && [regexp -- [dict get $H numRe] $w]} {
+                set tag number
+            } elseif {[dict exists $words $w]} {
+                set tag [dict get $words $w]
+                set defNext [expr {$w in [dict get $H defWords]}]
+            } elseif {$defNext} {
+                set tag [dict get $H defTag]
+                set defNext 0
+            } elseif {[dict get $H capType] ne "" && [string is upper [string index $w 0]]} {
+                set tag [dict get $H capType]
+            } else {
+                continue
+            }
+        } elseif {$tag eq "brace"} {
+            continue
+        } else {
+            set defNext 0
+        }
+        lappend out [list $tag $a [expr {$z + 1}]]
+    }
+    return $out
+}
+
+# --- HTML ------------------------------------------------------------------
+
+proc qc::md::esc {s} {
+    return [string map {& &amp; < &lt; > &gt; \" &quot;} $s]
+}
+
+proc qc::md::htmlInl {nodes} {
+    set out ""
+    foreach nd $nodes {
+        switch -- [lindex $nd 0] {
+            t {append out [esc [lindex $nd 1]]}
+            code {append out "<code>[esc [lindex $nd 1]]</code>"}
+            br {append out "<br>\n"}
+            html {append out [lindex $nd 1]}
+            em - strong - del {
+                set t [lindex $nd 0]
+                append out "<$t>[htmlInl [lrange $nd 1 end]]</$t>"
+            }
+            link {
+                lassign $nd - href title
+                set a "<a href=\"[esc $href]\""
+                if {$title ne ""} {append a " title=\"[esc $title]\""}
+                append out "$a>[htmlInl [lrange $nd 3 end]]</a>"
+            }
+            img {
+                lassign $nd - src alt title
+                set a "<img src=\"[esc $src]\" alt=\"[esc $alt]\""
+                if {$title ne ""} {append a " title=\"[esc $title]\""}
+                append out "$a>"
+            }
+        }
+    }
+    return $out
+}
+
+proc qc::md::htmlCode {lang text} {
+    set id [langId $lang]
+    set cls [expr {$lang ne "" ? " class=\"language-[esc $lang]\"" : ""}]
+    set out "<pre><code$cls>"
+    set p 0
+    if {$id ne ""} {
+        set styles [dict get [hlSpec $id] styles]
+        foreach r [hlCode $id $text] {
+            lassign $r tag a z
+            append out [esc [string range $text $p $a-1]]
+            set css ""
+            if {[dict exists $styles $tag]} {
+                lassign [dict get $styles $tag] color st
+                if {$color ne ""} {append css "color:$color;"}
+                if {$st eq "B"} {append css "font-weight:bold;"}
+                if {$st eq "I"} {append css "font-style:italic;"}
+            }
+            set chunk [esc [string range $text $a $z-1]]
+            append out [expr {$css ne "" ? "<span style=\"$css\">$chunk</span>" : $chunk}]
+            set p $z
+        }
+    }
+    append out [esc [string range $text $p end]] "</code></pre>\n"
+    return $out
+}
+
+proc qc::md::htmlBlocks {blocks {tight 0}} {
+    set out ""
+    foreach b $blocks {
+        switch -- [lindex $b 0] {
+            h {
+                lassign $b - - lv inl id
+                append out "<h$lv id=\"[esc $id]\">[htmlInl $inl]</h$lv>\n"
+            }
+            p {
+                set c [htmlInl [lindex $b 2]]
+                append out [expr {$tight ? "$c\n" : "<p>$c</p>\n"}]
+            }
+            code {append out [htmlCode [lindex $b 2] [lindex $b 3]]}
+            quote {append out "<blockquote>\n[htmlBlocks [lindex $b 2]]</blockquote>\n"}
+            hr {append out "<hr>\n"}
+            html {append out [lindex $b 2] \n}
+            list {
+                lassign $b - - ordered start tgt items
+                set tasks 0
+                foreach it $items {if {[lindex $it 0] ne ""} {set tasks 1}}
+                set cls [expr {$tasks ? " class=\"task-list\"" : ""}]
+                if {$ordered} {
+                    set st [expr {$start != 1 ? " start=\"$start\"" : ""}]
+                    append out "<ol$st$cls>\n"
+                } else {
+                    append out "<ul$cls>\n"
+                }
+                foreach it $items {
+                    lassign $it task sub
+                    append out "<li>"
+                    if {$task ne ""} {
+                        append out "<input type=\"checkbox\" disabled[expr {$task ? " checked" : ""}]> "
+                    }
+                    set inner [htmlBlocks $sub $tgt]
+                    append out [expr {$tgt ? [string trimright $inner \n] : "\n$inner"}] "</li>\n"
+                }
+                append out [expr {$ordered ? "</ol>\n" : "</ul>\n"}]
+            }
+            table {
+                lassign $b - - aligns head rows
+                append out "<table>\n<thead>\n<tr>"
+                foreach c $head a $aligns {
+                    set st [expr {$a ne "" ? " style=\"text-align:$a\"" : ""}]
+                    append out "<th$st>[htmlInl $c]</th>"
+                }
+                append out "</tr>\n</thead>\n<tbody>\n"
+                foreach r $rows {
+                    append out "<tr>"
+                    foreach c $r a $aligns {
+                        set st [expr {$a ne "" ? " style=\"text-align:$a\"" : ""}]
+                        append out "<td$st>[htmlInl $c]</td>"
+                    }
+                    append out "</tr>\n"
+                }
+                append out "</tbody>\n</table>\n"
+            }
+        }
+    }
+    return $out
+}
+
+# Documento HTML completo. base: pasta para resolver caminhos relativos
+# (usada na cópia temporária aberta no navegador).
+proc qc::md::toHtml {text {title ""} {base ""}} {
+    set blocks [parse $text]
+    if {$title eq ""} {
+        foreach b $blocks {
+            if {[lindex $b 0] eq "h"} {set title [plain [lindex $b 3]]; break}
+        }
+    }
+    set head "<meta charset=\"utf-8\">\n"
+    append head "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+    append head "<meta name=\"generator\" content=\"qconsole $::qc::version\">\n"
+    if {$base ne ""} {
+        set u [string map {% %25 " " %20 # %23 ? %3F} [file normalize $base]]
+        append head "<base href=\"file://$u/\">\n"
+    }
+    append head "<title>[esc $title]</title>\n"
+    set body [htmlBlocks $blocks]
+    append out "<!DOCTYPE html>\n<html>\n<head>\n$head<style>\n[css]</style>\n</head>\n" \
+        "<body>\n<main class=\"markdown-body\">\n$body</main>\n</body>\n</html>\n"
+    return $out
+}
+
+proc qc::md::css {} {
+    return {:root {
+  --fg: #1f2328; --muted: #59636e; --bg: #ffffff; --border: #d1d9e0;
+  --code-bg: #eff1f3; --link: #0969da; --row: #f6f8fa; --pre-bg: #2b2b2b; --pre-fg: #a9b7c6;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6edf3; --muted: #9198a1; --bg: #0d1117; --border: #3d444d;
+    --code-bg: #262c36; --link: #4493f8; --row: #151b23; --pre-bg: #1e1f22;
+  }
+}
+html { background: var(--bg); color: var(--fg); }
+body {
+  margin: 0; padding: 32px 16px;
+  font: 16px/1.6 -apple-system, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+}
+.markdown-body { max-width: 860px; margin: 0 auto; overflow-wrap: break-word; }
+h1, h2, h3, h4, h5, h6 { margin: 1.5em 0 .6em; line-height: 1.25; font-weight: 600; }
+h1 { font-size: 2em; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+h2 { font-size: 1.5em; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+h3 { font-size: 1.25em; } h4 { font-size: 1em; }
+h5 { font-size: .875em; } h6 { font-size: .85em; color: var(--muted); }
+.markdown-body > :first-child { margin-top: 0; }
+p, ul, ol, blockquote, pre, table { margin: 0 0 16px; }
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, pre {
+  font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+  font-size: 85%;
+}
+code { background: var(--code-bg); padding: .2em .4em; border-radius: 6px; }
+pre {
+  background: var(--pre-bg); color: var(--pre-fg); padding: 16px;
+  border-radius: 6px; overflow: auto; line-height: 1.45;
+}
+pre code { background: none; padding: 0; font-size: 100%; color: inherit; }
+blockquote { margin-left: 0; padding: 0 1em; color: var(--muted); border-left: .25em solid var(--border); }
+ul, ol { padding-left: 2em; }
+li + li { margin-top: .25em; }
+ul.task-list { list-style: none; padding-left: 1.2em; }
+ul.task-list input { margin: 0 .3em 0 -1.2em; vertical-align: middle; }
+hr { height: 2px; border: 0; background: var(--border); margin: 24px 0; }
+table { border-collapse: collapse; display: block; max-width: 100%; overflow: auto; }
+th, td { border: 1px solid var(--border); padding: 6px 13px; }
+th { font-weight: 600; }
+tr:nth-child(2n) td { background: var(--row); }
+img { max-width: 100%; }
+del { color: var(--muted); }
+}
+}
+
+# --- painel de pré-visualização ----------------------------------------------
+# Fica à direita do editor/saída (painel .md de .hp) quando a aba ativa é
+# Markdown e Exibir > Pré-visualização do Markdown está ligado. É redesenhado
+# ao editar (com atraso) e acompanha a rolagem do editor; duplo clique leva
+# o editor à linha correspondente.
+
+namespace eval qc {
+    variable MD
+    array set MD {after "" sync 0 lines {} fonts {} links 0 shown 0}
+    # cores da pré-visualização
+    array set C {
+        mdfg #c9d1d9 mdhead #e6e6e6 mdmuted #8b949e mdlink #589df6
+        mdcode #e0a96d mdcodebg #3a3d41 mdprebg #1e1f22 mdrule #4a4d50
+        mdquotebg #303235 mdthbg #35383b
+    }
+}
+
+proc qc::buildPreview {} {
+    variable C
+    ttk::frame .md
+    ttk::frame .md.head -style Head.TFrame
+    ttk::label .md.head.l -text "Pré-visualização" -style Head.TLabel -anchor w
+    ttk::button .md.head.x -text ✕ -style Head.TButton -takefocus 0 \
+        -command {set ::qc::cfg(mdpreview) 0; qc::mdApply}
+    ttk::button .md.head.b -text "Navegador" -style Head.TButton -takefocus 0 \
+        -command qc::mdBrowser
+    ttk::button .md.head.e -text "Exportar HTML…" -style Head.TButton -takefocus 0 \
+        -command qc::mdExport
+    pack .md.head.x .md.head.b .md.head.e -side right
+    pack .md.head.l -side left -fill x -expand 1
+    set w [text .md.t -background $C(edbg) -foreground $C(mdfg) -wrap word \
+        -font [mdFont body] -bd 0 -highlightthickness 0 -padx 18 -pady 12 \
+        -cursor arrow -insertwidth 0 -selectbackground $C(sel) \
+        -selectforeground {} -inactiveselectbackground $C(sel) \
+        -spacing1 1 -spacing3 1 -yscrollcommand {.md.sy set}]
+    ttk::scrollbar .md.sy -orient vertical -command [list $w yview]
+    grid .md.head - -sticky ew
+    grid $w .md.sy -sticky nsew
+    grid columnconfigure .md 0 -weight 1
+    grid rowconfigure .md 1 -weight 1
+    # só leitura, mas com seleção e cópia
+    bindtags $w [list $w QcKeys QcMdView Text . all]
+    bind QcMdView <KeyPress> {
+        if {%K ni {Up Down Left Right Prior Next Home End}} break
+    }
+    foreach ev {<<Cut>> <<Paste>> <<Clear>> <<Undo>> <<Redo>> <BackSpace> <Delete> <Return>} {
+        bind QcMdView $ev break
+    }
+    bind $w <Double-1> {qc::mdGotoSource %x %y; break}
+    bind $w <Configure> qc::mdRules
+    bind $w <Control-MouseWheel> {qc::zoom [expr {%D > 0 ? 1 : -1}]; break}
+
+    $w tag configure p -spacing3 10
+    $w tag configure tight -spacing3 3
+    $w tag configure head -foreground $C(mdhead) -spacing1 14 -spacing3 8
+    $w tag configure quote -foreground $C(mdmuted) -background $C(mdquotebg)
+    $w tag configure icode -foreground $C(mdcode) -background $C(mdcodebg)
+    $w tag configure pre -background $C(mdprebg) -foreground $C(edfg) \
+        -font [mdFont mono] -wrap char -spacing1 0 -spacing3 0 -lmargin1 12 -lmargin2 12 -rmargin 12
+    $w tag configure prepad -background $C(mdprebg) -font [list [mdFamily] 4] \
+        -spacing1 0 -spacing3 0
+    $w tag configure del -overstrike 1 -foreground $C(mdmuted)
+    $w tag configure link -foreground $C(mdlink) -underline 1
+    $w tag configure muted -foreground $C(mdmuted)
+    $w tag configure htmlblk -foreground $C(mdmuted) -font [mdFont mono]
+    $w tag configure th -background $C(mdthbg)
+    $w tag configure bullet -foreground $C(mdmuted)
+    $w tag configure gap -spacing3 6
+    $w tag configure sgap -font [list [mdFamily] 5] -spacing1 0 -spacing3 0
+    $w tag bind link <Enter> [list $w configure -cursor hand2]
+    $w tag bind link <Leave> [list $w configure -cursor arrow]
+    foreach t {keyword defname type string comment number var interp option
+               annot brace directive builtin constant symbol} {
+        lassign [dict get $::qc::S $t] color st
+        set opts [list -foreground $color]
+        switch -- $st {
+            B {lappend opts -font [mdFont mono 1 0]}
+            I {lappend opts -font [mdFont mono 0 1]}
+        }
+        $w tag configure syn_$t {*}$opts
+    }
+    $w tag raise sel
+}
+
+# Fonte da pré-visualização: kind = body | h1..h6 | mono; b/i = negrito/itálico.
+proc qc::mdFont {kind {b 0} {i 0}} {
+    variable MD
+    set name QcMd_${kind}_$b$i
+    if {$name ni [font names]} {
+        if {$kind eq "mono"} {
+            set fam [font actual QcMono -family]
+        } else {
+            set fam [mdFamily]
+        }
+        font create $name -family $fam
+        dict set MD(fonts) $name [list $kind $b $i]
+        mdFontSize $name
+    }
+    return $name
+}
+
+proc qc::mdFamily {} {
+    variable MD
+    if {[info exists MD(family)]} {return $MD(family)}
+    set fams [font families]
+    foreach f {"Noto Sans" "Inter" "Segoe UI" "Ubuntu" "Cantarell" "DejaVu Sans"
+               "Liberation Sans" "Helvetica" "Arial"} {
+        if {[lsearch -nocase -exact $fams $f] >= 0} {return [set MD(family) $f]}
+    }
+    return [set MD(family) [font actual TkDefaultFont -family]]
+}
+
+proc qc::mdFontSize {name} {
+    variable MD
+    lassign [dict get $MD(fonts) $name] kind b i
+    set base [expr {$::qc::cfg(fontsize) + 1}]
+    set scale [dict get {body 1.0 mono 0.92 h1 1.9 h2 1.55 h3 1.3 h4 1.12 h5 1.0 h6 0.92} $kind]
+    if {$kind in {h1 h2 h3 h4 h5 h6}} {set b 1}
+    font configure $name -size [expr {max(6, round($base * $scale))}] \
+        -weight [expr {$b ? "bold" : "normal"}] -slant [expr {$i ? "italic" : "roman"}]
+}
+
+proc qc::mdZoom {} {
+    variable MD
+    foreach name [dict keys $MD(fonts)] {mdFontSize $name}
+    if {$MD(shown)} {mdRender}
+}
+
+proc qc::mdVisible {} {
+    return [expr {$::qc::cfg(mdpreview) && $::qc::lang eq "markdown"}]
+}
+
+# Mostra/esconde o painel conforme a aba ativa e a opção.
+proc qc::mdApply {} {
+    variable MD
+    variable cfg
+    if {![winfo exists .md]} {return}
+    set want [mdVisible]
+    set shown [expr {".md" in [.hp panes]}]
+    if {$want && !$shown} {
+        .hp add .md -weight 1
+        update idletasks
+        set k [expr {[llength [.hp panes]] - 2}]
+        set wd [winfo width .hp]
+        set pw [expr {$cfg(mdw) > 100 ? $cfg(mdw) : $wd * 45 / 100}]
+        catch {.hp sashpos $k [expr {max(200, $wd - $pw)}]}
+    } elseif {!$want && $shown} {
+        set cfg(mdw) [winfo width .md]
+        .hp forget .md
+    }
+    set MD(shown) $want
+    if {$want} {
+        after cancel $MD(after)
+        set MD(after) [after idle qc::mdRender]
+    }
+    catch {
+        set m .mb.file
+        set st [expr {$::qc::lang eq "markdown" ? "normal" : "disabled"}]
+        $m entryconfigure "Exportar para HTML…" -state $st
+        $m entryconfigure "Abrir no navegador" -state $st
+    }
+}
+
+# Ctrl+Shift+M / Exibir > Pré-visualização do Markdown
+proc qc::mdToggle {} {
+    variable cfg
+    if {$::qc::lang ne "markdown"} {
+        set ::qc::status "A pré-visualização é para arquivos Markdown"
+        return
+    }
+    set cfg(mdpreview) [expr {!$cfg(mdpreview)}]
+    mdApply
+}
+
+proc qc::mdSched {} {
+    variable MD
+    if {!$MD(shown)} {return}
+    after cancel $MD(after)
+    set MD(after) [after 250 qc::mdRender]
+}
+
+proc qc::mdRender {} {
+    variable MD
+    variable ed
+    if {![mdVisible] || ![winfo exists .md.t]} {return}
+    set w .md.t
+    set MD(lines) {}
+    set MD(rules) {}
+    set MD(dir) [expr {$::qc::file ne "" ? [file dirname $::qc::file] : [pwd]}]
+    $w configure -state normal
+    $w delete 1.0 end
+    foreach m [$w mark names] {
+        if {[string match {src[0-9]*} $m] || [string match anchor:* $m]} {$w mark unset $m}
+    }
+    foreach t [$w tag names] {
+        if {[regexp {^(?:lnk|mg|tb)[0-9]} $t]} {$w tag delete $t}
+    }
+    foreach c [winfo children $w] {destroy $c}
+    set MD(links) 0
+    if {[catch {
+        set blocks [md::parse [$ed get 1.0 end-1c]]
+        mdBlocks $w $blocks [dict create ind 0 tight 0 quote 0 bullet "" level 0]
+    } err]} {
+        $w insert end "Erro ao interpretar o Markdown:\n$::errorInfo" muted
+    }
+    # sem linha em branco sobrando no fim
+    while {[$w get "end-2c"] eq "\n" && [$w compare end-2c > 1.0]} {$w delete end-2c}
+    $w configure -state disabled
+    mdRules
+    mdSyncNow
+}
+
+# Tag de margens (criada sob demanda).
+proc qc::mdMargin {w l1 l2} {
+    set t mg$l1,$l2
+    if {$t ni [$w tag names]} {
+        $w tag configure $t -lmargin1 $l1 -lmargin2 $l2
+        $w tag lower $t
+    }
+    return $t
+}
+
+# Marca a linha do fonte no ponto atual (sincronização da rolagem).
+proc qc::mdMark {w line} {
+    variable MD
+    if {[llength $MD(lines)] && [lindex $MD(lines) end] >= $line} {return}
+    $w mark set src$line end-1c
+    $w mark gravity src$line left
+    lappend MD(lines) $line
+}
+
+proc qc::mdBlocks {w blocks ctx} {
+    set step 24
+    foreach b $blocks {
+        set ind [dict get $ctx ind]
+        set tight [dict get $ctx tight]
+        set bullet [dict get $ctx bullet]
+        dict set ctx bullet ""
+        mdMark $w [lindex $b 1]
+        set s [$w index end-1c]
+        set extra {}
+        if {[dict get $ctx quote]} {lappend extra quote}
+        # marcador de item de lista: na primeira linha do primeiro bloco
+        set l1 $ind
+        if {$bullet ne ""} {
+            set l1 [expr {$ind - $step}]
+            if {[lindex $b 0] in {p h}} {
+                $w insert end $bullet [list bullet {*}$extra]
+            } else {
+                $w insert end "$bullet\n" [list bullet {*}$extra]
+                $w tag add [mdMargin $w $l1 $ind] $s end-1c
+                set s [$w index end-1c]
+                set l1 $ind
+            }
+        }
+        set mg [mdMargin $w $l1 $ind]
+        switch -- [lindex $b 0] {
+            h {
+                lassign $b - - lv inl id
+                $w mark set anchor:$id end-1c
+                $w mark gravity anchor:$id left
+                mdInl $w $inl [dict create kind h$lv b 1 i 0 tags [list head {*}$extra]]
+                $w insert end \n $extra
+                $w tag add $mg $s end-1c
+                if {$lv <= 2} {mdRule $w $ind}
+            }
+            p {
+                mdInl $w [lindex $b 2] [dict create kind body b 0 i 0 tags $extra]
+                $w insert end \n $extra
+                $w tag add $mg $s end-1c
+                $w tag add [expr {$tight ? "tight" : "p"}] $s end-1c
+            }
+            code {
+                lassign $b - - lang text
+                set id [md::langId $lang]
+                set c0 [$w index end-1c]
+                $w insert end " \n" prepad
+                set cs [$w index end-1c]
+                $w insert end $text\n [list pre {*}$extra]
+                foreach r [md::hlCode $id $text] {
+                    lassign $r tag a z
+                    $w tag add syn_$tag "$cs +$a chars" "$cs +$z chars"
+                }
+                $w insert end " \n" prepad
+                set t pre$ind
+                if {$t ni [$w tag names]} {
+                    $w tag configure $t -lmargin1 [expr {$ind + 12}] -lmargin2 [expr {$ind + 12}]
+                }
+                $w tag add $t $c0 end-1c
+                $w tag add $mg $c0 end-1c
+                $w insert end \n gap
+            }
+            quote {
+                set sub $ctx
+                dict set sub ind [expr {$ind + 16}]
+                dict incr sub quote
+                dict set sub tight 0
+                mdBlocks $w [lindex $b 2] $sub
+                $w insert end \n sgap
+            }
+            hr {
+                mdRule $w $ind
+            }
+            html {
+                $w insert end [lindex $b 2]\n [list htmlblk {*}$extra]
+                $w tag add $mg $s end-1c
+                $w insert end \n gap
+            }
+            list {
+                lassign $b - - ordered start tgt items
+                set lvl [dict get $ctx level]
+                set n $start
+                foreach it $items {
+                    lassign $it task sub
+                    if {$task ne ""} {
+                        set mk [expr {$task ? "☑" : "☐"}]
+                    } elseif {$ordered} {
+                        set mk "$n."
+                    } else {
+                        set mk [lindex {• ◦ ▪} [expr {$lvl % 3}]]
+                    }
+                    incr n
+                    set c $ctx
+                    dict set c ind [expr {$ind + $step}]
+                    dict set c tight $tgt
+                    dict set c level [expr {$lvl + 1}]
+                    dict set c bullet "$mk\t"
+                    set tb tb[expr {$ind + $step}]
+                    if {$tb ni [$w tag names]} {
+                        $w tag configure $tb -tabs [list [expr {$ind + $step}]]
+                    }
+                    set s2 [$w index end-1c]
+                    if {![llength $sub]} {
+                        $w insert end "$mk\n" bullet
+                        $w tag add [mdMargin $w $ind $ind] $s2 end-1c
+                    } else {
+                        mdBlocks $w $sub $c
+                    }
+                    $w tag add $tb $s2 end-1c
+                }
+                if {$tgt && $lvl == 0} {$w insert end \n gap}
+            }
+            table {
+                mdTable $w $b $ind $extra
+            }
+        }
+    }
+}
+
+# Linha horizontal: um frame embutido que acompanha a largura do texto.
+proc qc::mdRule {w ind} {
+    variable MD
+    variable C
+    set f $w.r[llength $MD(rules)]
+    frame $f -height 1 -background $C(mdrule) -bd 0 -highlightthickness 0
+    set s [$w index end-1c]
+    $w window create end -window $f -align center
+    $w insert end \n
+    $w tag add [mdMargin $w $ind $ind] $s end-1c
+    $w tag add gap $s end-1c
+    lappend MD(rules) [list $f $ind]
+}
+
+proc qc::mdRules {} {
+    variable MD
+    set w .md.t
+    if {![winfo exists $w] || ![info exists MD(rules)]} {return}
+    set full [expr {[winfo width $w] - 2 * [$w cget -padx] - 6}]
+    foreach r $MD(rules) {
+        lassign $r f ind
+        if {[winfo exists $f]} {$f configure -width [expr {max(10, $full - $ind)}]}
+    }
+}
+
+# Tabela: colunas alinhadas com paradas de tabulação.
+proc qc::mdTable {w b ind extra} {
+    lassign $b - - aligns head rows
+    set nc [llength $head]
+    set fb [mdFont body]
+    set fh [mdFont body 1]
+    set gap 22
+    for {set c 0} {$c < $nc} {incr c} {
+        set wd [font measure $fh [md::plain [lindex $head $c]]]
+        foreach r $rows {
+            set wd [expr {max($wd, [font measure $fb [md::plain [lindex $r $c]]])}]
+        }
+        lappend widths [expr {$wd + $gap}]
+    }
+    set tabs {}
+    set x [expr {$ind + 8}]
+    foreach wd $widths a $aligns {
+        switch -- $a {
+            center {lappend tabs [expr {$x + $wd / 2}] center}
+            right {lappend tabs [expr {$x + $wd - $gap}] right}
+            default {lappend tabs $x left}
+        }
+        incr x $wd
+    }
+    set t tb[incr ::qc::MD(links)]x
+    $w tag configure $t -tabs $tabs -lmargin1 $ind -lmargin2 $ind -spacing1 3 -spacing3 3
+    set s [$w index end-1c]
+    foreach cell $head {
+        $w insert end \t $extra
+        mdInl $w $cell [dict create kind body b 1 i 0 tags $extra]
+    }
+    $w insert end \n
+    $w tag add th $s end-1c
+    foreach r $rows {
+        foreach cell $r {
+            $w insert end \t $extra
+            mdInl $w $cell [dict create kind body b 0 i 0 tags $extra]
+        }
+        $w insert end \n
+    }
+    $w tag add $t $s end-1c
+    $w insert end \n gap
+}
+
+# Inlines; st: kind (fonte), b, i, tags (tags extras).
+proc qc::mdInl {w nodes st} {
+    variable MD
+    variable C
+    foreach nd $nodes {
+        set kind [dict get $st kind]
+        set font [mdFont $kind [dict get $st b] [dict get $st i]]
+        set tags [list $font {*}[dict get $st tags]]
+        if {$font ni [$w tag names]} {$w tag configure $font -font $font}
+        switch -- [lindex $nd 0] {
+            t {$w insert end [string map {\n " "} [lindex $nd 1]] $tags}
+            br {$w insert end \n $tags}
+            code {
+                set mf [mdFont mono [dict get $st b] [dict get $st i]]
+                if {$mf ni [$w tag names]} {$w tag configure $mf -font $mf}
+                $w insert end [lindex $nd 1] [list $mf icode {*}[dict get $st tags]]
+            }
+            em {mdInl $w [lrange $nd 1 end] [dict replace $st i 1]}
+            strong {mdInl $w [lrange $nd 1 end] [dict replace $st b 1]}
+            del {mdInl $w [lrange $nd 1 end] [dict replace $st tags [list del {*}[dict get $st tags]]]}
+            html {$w insert end [lindex $nd 1] [list {*}$tags muted]}
+            link {
+                lassign $nd - href title
+                set lt lnk[incr MD(links)]
+                $w tag bind $lt <1> [list qc::mdOpenLink $href]
+                $w tag bind $lt <Enter> [list set ::qc::status $href]
+                set inner [lrange $nd 3 end]
+                if {![llength $inner]} {set inner [list [list t $href]]}
+                mdInl $w $inner [dict replace $st tags [list link $lt {*}[dict get $st tags]]]
+            }
+            img {
+                lassign $nd - src alt
+                set img [mdImage $src]
+                if {$img ne ""} {
+                    $w image create end -image $img -padx 2 -pady 4
+                } else {
+                    $w insert end "\[🖼 [expr {$alt ne "" ? $alt : [file tail $src]}]\]" [list {*}$tags muted]
+                }
+            }
+        }
+    }
+}
+
+# Imagem local (PNG/GIF/SVG...) reduzida para caber; "" se não der.
+proc qc::mdImage {src} {
+    variable MD
+    if {[regexp {^[a-z]+://} $src] && ![string match file://* $src]} {return ""}
+    set p [regsub {^file://} $src ""]
+    set p [regsub {[?#].*$} $p ""]
+    if {[file pathtype $p] ne "absolute"} {set p [file join $MD(dir) $p]}
+    if {![file isfile $p]} {return ""}
+    set key img,[file normalize $p]
+    set mt [file mtime $p]
+    if {[info exists MD($key)] && [lindex $MD($key) 0] == $mt} {return [lindex $MD($key) 1]}
+    if {[catch {image create photo -file $p} img]} {return ""}
+    set maxw 700
+    set wd [image width $img]
+    if {$wd > $maxw} {
+        set k [expr {int(ceil($wd / double($maxw)))}]
+        set small [image create photo]
+        $small copy $img -subsample $k $k
+        image delete $img
+        set img $small
+    }
+    if {[info exists MD($key)]} {catch {image delete [lindex $MD($key) 1]}}
+    set MD($key) [list $mt $img]
+    return $img
+}
+
+proc qc::mdOpenLink {href} {
+    variable MD
+    if {[string match #* $href]} {
+        set id [string range $href 1 end]
+        if {"anchor:$id" in [.md.t mark names]} {.md.t yview anchor:$id}
+        return
+    }
+    if {[regexp {^(?:https?|ftp|mailto|file):} $href]} {
+        mdOpenExternal $href
+        return
+    }
+    set p [regsub {#.*$} $href ""]
+    if {[file pathtype $p] ne "absolute"} {set p [file join $MD(dir) $p]}
+    if {![file exists $p]} {
+        set ::qc::status "Não encontrado: $p"
+        return
+    }
+    set ext [string tolower [file extension $p]]
+    if {[file isfile $p] && ([langForFileAny $p] ne "" || $ext in {.txt ""})} {
+        openFile $p
+    } else {
+        mdOpenExternal $p
+    }
+}
+
+proc qc::mdOpenExternal {target} {
+    switch -- $::tcl_platform(os) {
+        Darwin {set cmd [list open $target]}
+        default {
+            if {$::tcl_platform(platform) eq "windows"} {
+                set cmd [list cmd /c start "" $target]
+            } else {
+                set cmd [list xdg-open $target]
+            }
+        }
+    }
+    if {[catch {exec {*}$cmd >/dev/null 2>@1 &} err]} {
+        set ::qc::status "Não foi possível abrir: $err"
+    } else {
+        set ::qc::status "Abrindo: $target"
+    }
+}
+
+# Rolagem do editor -> pré-visualização (interpola entre os blocos).
+proc qc::mdSync {} {
+    variable MD
+    if {!$MD(shown) || $MD(sync)} {return}
+    set MD(sync) 1
+    after idle qc::mdSyncNow
+}
+
+proc qc::mdSyncNow {} {
+    variable MD
+    variable ed
+    set MD(sync) 0
+    if {!$MD(shown) || ![llength $MD(lines)]} {return}
+    set w .md.t
+    lassign [$ed yview] top bot
+    if {$top <= 0} {$w yview moveto 0; return}
+    if {$bot >= 1} {$w yview moveto 1; return}
+    set T [lindex [split [$ed index @0,0] .] 0]
+    set k [lsearch -bisect -integer $MD(lines) $T]
+    if {$k < 0} {$w yview moveto 0; return}
+    set l0 [lindex $MD(lines) $k]
+    if {[catch {
+        set y0 [$w count -ypixels 1.0 src$l0]
+        if {$k + 1 < [llength $MD(lines)]} {
+            set l1 [lindex $MD(lines) $k+1]
+            set y1 [$w count -ypixels 1.0 src$l1]
+        } else {
+            set l1 [lindex [split [$ed index end] .] 0]
+            set y1 [$w count -ypixels 1.0 end]
+        }
+        set f [expr {$l1 > $l0 ? ($T - $l0) / double($l1 - $l0) : 0}]
+        set y [expr {$y0 + $f * ($y1 - $y0)}]
+        set total [$w count -ypixels 1.0 end]
+        if {$total > 0} {$w yview moveto [expr {$y / double($total)}]}
+    }]} {
+        catch {$w yview src$l0}
+    }
+}
+
+# Duplo clique na pré-visualização: leva o editor à linha do bloco.
+proc qc::mdGotoSource {x y} {
+    set w .md.t
+    set idx [$w index @$x,$y]
+    set m [$w mark previous "$idx +1c"]
+    while {$m ne "" && ![regexp {^src([0-9]+)$} $m -> line]} {
+        set m [$w mark previous $m]
+    }
+    if {$m eq ""} {set line 1}
+    gotoLine $line
+    focus $::qc::ed
+}
+
+# --- exportação ------------------------------------------------------------
+
+proc qc::mdHtmlTitle {} {
+    variable file
+    return [expr {$file ne "" ? [file rootname [file tail $file]] : ""}]
+}
+
+proc qc::mdExport {} {
+    variable file
+    variable cfg
+    if {$::qc::lang ne "markdown"} {
+        set ::qc::status "Exportar para HTML é para arquivos Markdown"
+        return
+    }
+    set opts [list -parent . -title "Exportar para HTML" -defaultextension .html \
+        -filetypes {{HTML {.html .htm}} {"Todos os arquivos" *}}]
+    if {$file ne ""} {
+        lappend opts -initialdir [file dirname $file] \
+            -initialfile [file rootname [file tail $file]].html
+    } elseif {$cfg(lastdir) ne "" && [file isdirectory $cfg(lastdir)]} {
+        lappend opts -initialdir $cfg(lastdir)
+    }
+    set path [tk_getSaveFile {*}$opts]
+    if {$path eq ""} {return}
+    # caminhos relativos (imagens, links) continuam valendo se o HTML for
+    # gravado em outra pasta
+    set base ""
+    if {$file ne "" && [file normalize [file dirname $path]] ne [file dirname $file]} {
+        set base [file dirname $file]
+    }
+    set html [md::toHtml [$::qc::ed get 1.0 end-1c] "" $base]
+    if {[catch {writeFile $path $html} err]} {
+        tk_messageBox -parent . -icon error -title qconsole \
+            -message "Não foi possível exportar." -detail $err
+        return
+    }
+    set ::qc::status "Exportado: $path"
+}
+
+# Abre o documento no navegador (HTML temporário).
+proc qc::mdBrowser {} {
+    variable file
+    if {$::qc::lang ne "markdown"} {
+        set ::qc::status "Abrir no navegador é para arquivos Markdown"
+        return
+    }
+    set base [expr {$file ne "" ? [file dirname $file] : [pwd]}]
+    set name [expr {$file ne "" ? [file rootname [file tail $file]] : "sem-titulo"}]
+    set path [file join [tmpDir] $name.html]
+    if {[catch {
+        writeFile $path [md::toHtml [$::qc::ed get 1.0 end-1c] "" $base]
+    } err]} {
+        set ::qc::status "Não foi possível gerar o HTML: $err"
+        return
+    }
+    mdOpenExternal $path
 }
 
 # ===========================================================================
@@ -6509,6 +8176,116 @@ qc::language shell {
         {name dash label dash exe {dash} args {%O %F %A}}
     }
     errPatterns {{%F: line ([0-9]+):} {%F:([0-9]+):} {%F: ([0-9]+):}}
+}
+
+# --- Markdown --------------------------------------------------------------
+# Sem interpretador: Ctrl+R mostra a pré-visualização (hook run) e
+# Arquivo > Exportar para HTML gera a página (ver "Markdown" acima).
+
+qc::language markdown {
+    name     Markdown
+    ext      {.md .markdown .mkd .mdown}
+    comment  <!--
+    commentEnd -->
+    indent   2
+    dedentChars ""
+    autoPairs {() []}
+    tokens {
+        comment  {<!--(?:[^-]|-(?!->))*(?:-->)?}
+        mdcode   {^ {0,3}```[^\n]*(?:\n(?! {0,3}```)[^\n]*)*(?:\n {0,3}```[^\n]*)?}
+        mdcode   {^ {0,3}~~~[^\n]*(?:\n(?! {0,3}~~~)[^\n]*)*(?:\n {0,3}~~~[^\n]*)?}
+        mdhead   {^ {0,3}#{1,6}(?:[ \t][^\n]*)?$}
+        mdhead   {^ {0,3}(?:=+|-+)[ \t]*$}
+        mdhr     {^ {0,3}(?:[*_][ \t]*){3,}$}
+        mdmark   {^[ \t]*((?:>[ \t]?)+)}
+        mdmark   {^[ \t]*((?:[-*+]|[0-9]+[.)])(?:[ \t]+\[[ xX]\])?)(?=[ \t])}
+        mdcode   {``(?:[^`\n]|`(?!`))+``}
+        mdcode   {`[^`\n]+`}
+        mdstrong {\*\*(?![ \t])(?:[^*\n]|\*(?!\*))+\*\*}
+        mdstrong {\m__(?![ \t])[^_\n]+__\M}
+        mdem     {\*(?![ \t*])[^*\n]*[^*\s]\*|\*[^*\s]\*}
+        mdem     {\m_(?![ \t_])[^_\n]*_\M}
+        mddel    {~~[^~\n]+~~}
+        mdlink   {!?\[[^\]\n]*\]\([^)\n]*\)}
+        mdlink   {!?\[[^\]\n]*\]\[[^\]\n]*\]}
+        mdlink   {^ {0,3}\[[^\]\n]+\]:[^\n]*}
+        mdlink   {<(?:https?|mailto|ftp):[^>\s]*>}
+        mdlink   {https?://[^\s<>()]+}
+        mdhtml   {</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>\n]*)?/?>}
+        escape   {\\[^\n]}
+        brace    {\|}
+    }
+    styles {
+        mdhead   {#cc7832 B}
+        mdhr     {#808080 {}}
+        mdmark   {#cc7832 {}}
+        mdcode   {#6a8759 {}}
+        mdstrong {#d4d4d4 B}
+        mdem     {#a9b7c6 I}
+        mddel    {#808080 {}}
+        mdlink   {#589df6 {}}
+        mdhtml   {#e8bf6a {}}
+        brace    {#808080 {}}
+    }
+}
+
+# Enter continua listas ("- ", "1. " -> "2. ", "- [ ] ") e citações ("> ");
+# num item vazio, encerra a lista (apaga o marcador e não abre outra linha).
+proc qc::lang::markdown::newlineIndent {} {
+    set ed $::qc::ed
+    set before [$ed get "insert linestart" insert]
+    set after [string trim [$ed get insert "insert lineend"]]
+    if {[regexp {^([ \t]*)(?:([-*+])|([0-9]+)([.)]))([ \t]+)(\[[ xX]\][ \t]+)?(.*)$} \
+            $before -> ws bul num delim sp box rest]} {
+        if {[string trim $rest] eq "" && $after eq ""} {
+            $ed delete "insert linestart" insert
+            return -code break
+        }
+        set mk [expr {$bul ne "" ? $bul : "[expr {[scan $num %d] + 1}]$delim"}]
+        if {$box ne ""} {set box "\[ \] "}
+        return "$ws$mk$sp$box"
+    }
+    if {[regexp {^([ \t]*(?:>[ \t]?)+)(.*)$} $before -> q rest]} {
+        if {[string trim $rest] eq "" && $after eq ""} {
+            $ed delete "insert linestart" insert
+            return -code break
+        }
+        return $q
+    }
+    regexp {^[ \t]*} $before ws
+    return $ws
+}
+
+# Ctrl+R: mostra (e atualiza) a pré-visualização.
+proc qc::lang::markdown::run {selOnly} {
+    set ::qc::cfg(mdpreview) 1
+    ::qc::mdApply
+    set ::qc::status "Pré-visualização atualizada (Arquivo > Exportar para HTML… gera a página)"
+}
+
+qc::template markdown "Documento" {# Título
+
+Um parágrafo com **negrito**, *itálico*, `código` e um [link](https://example.com).
+
+## Lista
+
+- item
+- [ ] tarefa
+- [x] tarefa feita
+
+1. primeiro
+2. segundo
+
+> Citação.
+
+```tcl
+proc soma {a b} { expr {$a + $b} }
+```
+
+| Coluna | Valor |
+|--------|------:|
+| a      |     1 |
+| b      |     2 |
 }
 
 # ---------------------------------------------------------------------------

@@ -78,6 +78,13 @@ pode ser interrompida a qualquer momento.
   (erros em vermelho, avisos em amarelo). A formatação mexe só nas linhas que
   mudam e é desfeita com um Ctrl+Z (veja a tabela abaixo)
 - Saída com cores ANSI, stderr, avisos e mensagens informativas destacados
+- Markdown: destaque no editor e pré-visualização ao lado (Exibir >
+  Pré-visualização do Markdown, Ctrl+Shift+M, ou Ctrl+R), atualizada ao
+  digitar e acompanhando a rolagem do editor; duplo clique na
+  pré-visualização leva à linha no editor. Arquivo > Exportar para HTML…
+  (Ctrl+Shift+E) gera uma página completa (tema claro/escuro, código
+  colorido com as cores do editor); Arquivo > Abrir no navegador mostra
+  uma cópia temporária no navegador (veja abaixo)
 - Detecção automática do interpretador e da versão instalada
 - Modelos de código (Arquivo > Novo a partir de modelo)
 - Arquivos recentes, tamanho de fonte, quebra de linha, geometria da janela e
@@ -95,6 +102,7 @@ pode ser interrompida a qualquer momento.
 | Scheme    | `.scm .ss .sls .sps .sld` | Guile, Chez Scheme |
 | OCaml     | `.ml .mli .mlx` | `ocaml`, OxCaml (switch do opam) |
 | Shell     | `.sh .bash .zsh .ksh` | `bash`, `sh`, `zsh`, `dash` |
+| Markdown  | `.md .markdown .mkd .mdown` | — (Ctrl+R pré-visualiza) |
 
 Detalhes por linguagem:
 
@@ -106,6 +114,16 @@ Detalhes por linguagem:
   JVM, Scala.js e Scala Native usando diretivas `//> using` do scala-cli.
 - **Scheme** — indentação no estilo Lisp. No Guile o código é compilado antes
   de rodar, para que os erros tragam linha e coluna.
+- **Markdown** — o leitor embutido cobre o CommonMark usual e as extensões
+  do GitHub mais comuns: títulos (`#` e sublinhados), ênfase, `código`,
+  ~~riscado~~, listas (aninhadas, numeradas, de tarefas `- [ ]`), citações,
+  blocos de código (```` ``` ```` com linguagem: as do tcode saem coloridas),
+  tabelas com alinhamento, links (inclusive `[texto][ref]`, `<url>` e URLs
+  soltas), imagens e HTML embutido (passado como está para o HTML
+  exportado). Na pré-visualização, imagens locais PNG/GIF/SVG aparecem
+  (reduzidas se forem largas); links externos abrem no navegador, links
+  para arquivos abrem no editor e `#âncora` rola até o título. Enter
+  continua listas e citações (num item vazio, encerra a lista).
 - **OCaml** — o runner OxCaml procura o toplevel no switch ativo do opam
   (`OPAM_SWITCH_PREFIX`) ou em `~/.opam/*ox*/bin/ocaml`.
 
@@ -166,6 +184,8 @@ o interpretador, as opções passadas a ele e os argumentos do programa.
 | Ctrl+Alt+R | Executar o comando do projeto (`.qconsole`) |
 | Ctrl+Shift+O | Abrir pasta |
 | Ctrl+B | Mostrar/esconder o painel de arquivos |
+| Ctrl+Shift+M | Mostrar/esconder a pré-visualização do Markdown |
+| Ctrl+Shift+E | Exportar Markdown para HTML |
 | Ctrl+' / Ctrl+` | Mostrar/esconder o terminal |
 | Ctrl+Break | Interromper execução |
 | Ctrl+W | Limpar saída |
@@ -277,8 +297,8 @@ símbolo exibido no lugar dela, ex.: `{define λ}`) (veja `langDefaults` no cód
 
 Hooks opcionais podem ser definidos como procs em `::qc::lang::<id>::` —
 `init`, `wordTag`, `prepare`, `defaultExt`, `newlineIndent`, `stderrLine`,
-`findExe`, `reformat` (formatador embutido: texto → texto) (as linguagens
-embutidas servem de exemplo).
+`findExe`, `reformat` (formatador embutido: texto → texto), `run` (substitui
+a execução, como no Markdown) (as linguagens embutidas servem de exemplo).
 
 Formatadores e linters externos ficam nas chaves `formatters` e `linters`, com
 o mesmo formato dos runners (a descrição completa das chaves está no código,
