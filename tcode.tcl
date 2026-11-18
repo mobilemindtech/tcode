@@ -106,7 +106,7 @@ namespace eval qc {
         fontsize 11 wrap 0 autoclear 1 recent {} geometry 1100x800
         lastdir "" lang "" folder "" sidebar 0 sidew 240 autocomp 1
         terminal 0 termpos side termcmd "" tabs {} tabcur "" hoverdef 1
-        pretty 1 mdpreview 1 mdw 0
+        pretty 1 mdpreview 1 mdw 0 recentdirs {}
     }
     variable T ;# terminal embutido: T(chan), T(pid), T(shown)
     array set T {}
@@ -571,8 +571,9 @@ proc qc::buildMenus {} {
     $m add command -label "Novo" -accelerator Ctrl+N -command qc::newFile
     $m add cascade -label "Novo a partir de modelo" -menu [menu $m.tpl -tearoff 0]
     $m add command -label "Abrir…" -accelerator Ctrl+O -command qc::openFile
-    $m add cascade -label "Recentes" -menu [menu $m.recent -tearoff 0]
+    $m add cascade -label "Arquivos recentes" -menu [menu $m.recent -tearoff 0]
     $m add command -label "Abrir pasta…" -accelerator Ctrl+Shift+O -command qc::openFolder
+    $m add cascade -label "Pastas recentes" -menu [menu $m.recentdirs -tearoff 0]
     $m add command -label "Fechar pasta" -command qc::closeFolder
     $m add separator
     $m add command -label "Salvar" -accelerator Ctrl+S -command qc::save
@@ -959,6 +960,10 @@ proc qc::buildSide {} {
     bind $t <<TreeviewOpen>> {qc::treeFill [.side.t focus]}
     bind $t <ButtonRelease-1> {qc::treeClick %x %y}
     bind $t <Return> {qc::treeActivate [.side.t focus]}
+    bind $t <Button-3> {qc::treePopup %x %y %X %Y}
+    bind $t <F2> {qc::treeRename [.side.t focus]}
+    bind $t <Delete> {qc::treeDelete [.side.t focus]}
+    menu .sidepop -tearoff 0
 }
 
 proc qc::treeFill {item} {
@@ -1009,22 +1014,379 @@ proc qc::treeActivate {item} {
     focus $::qc::ed
 }
 
+# Menu de contexto da árvore. Clique numa pasta cria dentro dela; num
+# arquivo, na pasta dele; no vazio, na raiz da pasta aberta.
+proc qc::treePopup {x y X Y} {
+    variable cfg
+    set t .side.t
+    if {$cfg(folder) eq ""} {return}
+    set item [$t identify item $x $y]
+    if {$item ne "" && [string index $item 0] eq "\x01"} {set item ""}
+    if {$item ne ""} {
+        $t selection set [list $item]
+        $t focus $item
+        set dir [expr {[$t tag has dir $item] ? $item : [file dirname $item]}]
+    } else {
+        set dir $cfg(folder)
+    }
+    set m .sidepop
+    $m delete 0 end
+    $m add command -label "Novo arquivo…" -command [list qc::treeNew file $dir]
+    $m add command -label "Nova pasta…" -command [list qc::treeNew dir $dir]
+    $m add separator
+    set st [expr {$item eq "" ? "disabled" : "normal"}]
+    $m add command -label "Renomear…" -accelerator F2 \
+        -command [list qc::treeRename $item] -state $st
+    $m add command -label "Mover…" -command [list qc::treeMove $item] -state $st
+    $m add command -label "Excluir" -accelerator Del \
+        -command [list qc::treeDelete $item] -state $st
+    $m add separator
+    $m add command -label "Atualizar" -command qc::refreshFolder
+    tk_popup $m $X $Y
+}
+
+# Pede um nome num diálogo pequeno; devolve "" se cancelado. sel = quantos
+# caracteres deixar selecionados (padrão: tudo).
+proc qc::askName {title label {init ""} {sel end}} {
+    set w .ask
+    destroy $w
+    toplevel $w -background $::qc::C(ui)
+    wm title $w $title
+    wm transient $w .
+    wm resizable $w 0 0
+    ttk::frame $w.f -padding 10
+    ttk::label $w.f.l -text $label
+    ttk::entry $w.f.e -width 44
+    ttk::frame $w.f.b
+    ttk::button $w.f.b.ok -text OK -command {set ::qc::askDone 1}
+    ttk::button $w.f.b.c -text Cancelar -command {set ::qc::askDone 0}
+    pack $w.f -fill both -expand 1
+    pack $w.f.l -anchor w
+    pack $w.f.e -fill x -pady 6
+    pack $w.f.b -anchor e
+    pack $w.f.b.c $w.f.b.ok -side right -padx {6 0}
+    bind $w <Return> {set ::qc::askDone 1}
+    bind $w <Escape> {set ::qc::askDone 0}
+    wm protocol $w WM_DELETE_WINDOW {set ::qc::askDone 0}
+    $w.f.e insert 0 $init
+    $w.f.e selection range 0 $sel
+    $w.f.e icursor $sel
+    wm geometry $w +[expr {[winfo rootx .] + 200}]+[expr {[winfo rooty .] + 120}]
+    set ::qc::askDone 0
+    focus $w.f.e
+    catch {grab $w}
+    tkwait variable ::qc::askDone
+    set res [expr {$::qc::askDone ? [string trim [$w.f.e get]] : ""}]
+    destroy $w
+    return $res
+}
+
+# Nome válido para um item dentro de dir: sem barras, não vazio, inexistente.
+proc qc::checkNewName {dir name} {
+    if {$name in {"" . ..} || [string match */* $name]} {
+        return "Nome inválido."
+    }
+    if {[file exists [file join $dir $name]]} {
+        return "Já existe \"$name\" em [file tail $dir]."
+    }
+    return ""
+}
+
+proc qc::treeError {msg {detail ""}} {
+    tk_messageBox -parent . -icon error -title qconsole -message $msg -detail $detail
+}
+
+# Cria um arquivo (e abre no editor) ou uma pasta dentro de dir.
+proc qc::treeNew {kind dir} {
+    set title [expr {$kind eq "file" ? "Novo arquivo" : "Nova pasta"}]
+    set name [askName $title "Nome (em [file tail $dir]):"]
+    if {$name eq ""} {return}
+    set err [checkNewName $dir $name]
+    if {$err ne ""} {treeError $err; return}
+    set path [file join $dir $name]
+    if {[catch {
+        if {$kind eq "file"} {close [open $path {WRONLY CREAT EXCL}]} else {file mkdir $path}
+    } err]} {
+        treeError "Não foi possível criar \"$name\"." $err
+        return
+    }
+    refreshFolder
+    treeShow $path
+    if {$kind eq "file"} {openFile $path; focus $::qc::ed}
+}
+
+# Abre as pastas acima de path na árvore e o seleciona.
+proc qc::treeShow {path} {
+    variable cfg
+    set t .side.t
+    set root [file normalize $cfg(folder)]
+    if {[string first $root/ $path] != 0} {return}
+    set p $root
+    foreach part [lrange [file split [string range $path [string length $root]+1 end]] 0 end-1] {
+        set p [file join $p $part]
+        if {![$t exists $p]} {return}
+        treeFill $p
+        $t item $p -open 1
+    }
+    if {[$t exists $path]} {
+        $t selection set [list $path]
+        $t focus $path
+        $t see $path
+    }
+}
+
+# Um arquivo/pasta mudou de lugar: atualiza abas e arquivos recentes.
+proc qc::pathMoved {old new} {
+    variable TB
+    variable cfg
+    # abas abertas do arquivo (ou de arquivos dentro da pasta)
+    foreach w $::qc::tabs {
+        set f $TB($w,file)
+        if {$f eq $old || [string first $old/ $f] == 0} {
+            set TB($w,file) $new[string range $f [string length $old] end]
+            if {$w eq $::qc::ed} {
+                variable file $TB($w,file)
+                set id [langForFile $file]
+                if {$id ne "" && $id ne $::qc::lang} {setLang $id}
+            }
+        }
+    }
+    set l {}
+    foreach f $cfg(recent) {
+        if {$f eq $old || [string first $old/ $f] == 0} {
+            set f $new[string range $f [string length $old] end]
+        }
+        lappend l $f
+    }
+    set cfg(recent) $l
+    updateRecentMenu
+    updateTitle
+}
+
+# F2 / menu: renomeia arquivo ou pasta, atualizando abas e recentes.
+proc qc::treeRename {item} {
+    set t .side.t
+    if {![treeItemOk $item]} {return}
+    set old $item
+    set dir [file dirname $old]
+    set tail [file tail $old]
+    set ext [file extension $tail]
+    set sel [expr {[file isfile $old] && $ext ne "" && $ext ne $tail
+        ? [string length $tail] - [string length $ext] : "end"}]
+    set name [askName Renomear "Novo nome:" $tail $sel]
+    if {$name eq "" || $name eq $tail} {return}
+    set err [checkNewName $dir $name]
+    if {$err ne ""} {treeError $err; return}
+    set new [file join $dir $name]
+    set wasOpen [expr {[$t tag has dir $old] && [$t item $old -open]}]
+    if {[catch {file rename $old $new} err]} {
+        treeError "Não foi possível renomear \"$tail\"." $err
+        return
+    }
+    pathMoved $old $new
+    refreshFolder
+    if {$wasOpen && [$t exists $new]} {treeFill $new; $t item $new -open 1}
+    treeShow $new
+    set ::qc::status "Renomeado: $tail → $name"
+}
+
+proc qc::treeItemOk {item} {
+    expr {$item ne "" && [.side.t exists $item] && [string index $item 0] ne "\x01"}
+}
+
+# Move o arquivo/pasta para outra pasta (escolhida no seletor).
+proc qc::treeMove {item} {
+    if {![treeItemOk $item]} {return}
+    set tail [file tail $item]
+    set dest [chooseDir "Mover \"$tail\" para" [file dirname $item]]
+    if {$dest eq "" || $dest eq [file dirname $item]} {return}
+    if {$dest eq $item || [string first $item/ $dest] == 0} {
+        treeError "Não dá para mover uma pasta para dentro dela mesma."
+        return
+    }
+    set err [checkNewName $dest $tail]
+    if {$err ne ""} {treeError $err; return}
+    set new [file join $dest $tail]
+    if {[catch {file rename $item $new} err]} {
+        treeError "Não foi possível mover \"$tail\"." $err
+        return
+    }
+    pathMoved $item $new
+    refreshFolder
+    treeShow $new
+    set ::qc::status "Movido: $tail → $dest"
+}
+
+# Exclui (para a lixeira, se houver gio) o arquivo/pasta, depois de confirmar.
+# Abas dos arquivos excluídos são fechadas; as com alterações ficam abertas.
+proc qc::treeDelete {item} {
+    variable TB
+    variable cfg
+    if {![treeItemOk $item]} {return}
+    set tail [file tail $item]
+    set isDir [file isdirectory $item]
+    set trash [expr {[auto_execok gio] ne ""}]
+    set what [expr {$isDir ? "a pasta \"$tail\" e tudo dentro dela" : "\"$tail\""}]
+    set where [expr {$trash ? "para a lixeira" : "definitivamente"}]
+    set r [tk_messageBox -parent . -icon warning -type okcancel -default cancel \
+        -title Excluir -message "Excluir $what?" -detail "Será movido $where.\n$item"]
+    if {$r ne "ok"} {return}
+    if {$trash && [catch {exec gio trash -- $item} err]} {
+        set r [tk_messageBox -parent . -icon warning -type okcancel -default cancel \
+            -title Excluir -message "Não foi possível mover para a lixeira.\
+                Excluir definitivamente?" -detail [string trim $err]]
+        if {$r ne "ok"} {return}
+        set trash 0
+    }
+    if {!$trash && [catch {file delete -force -- $item} err]} {
+        treeError "Não foi possível excluir \"$tail\"." $err
+        return
+    }
+    foreach w $::qc::tabs {
+        set f $TB($w,file)
+        if {($f eq $item || [string first $item/ $f] == 0) && ![$w edit modified]} {
+            closeTab $w
+        }
+    }
+    set l {}
+    foreach f $cfg(recent) {
+        if {$f ne $item && [string first $item/ $f] != 0} {lappend l $f}
+    }
+    set cfg(recent) $l
+    updateRecentMenu
+    refreshFolder
+    set ::qc::status "Excluído: $tail"
+}
+
+# Seletor de pasta próprio: clique seleciona e "Abrir" abre a pasta
+# selecionada (o diálogo do Tk abriria a pasta de cima); duplo clique entra.
+proc qc::chooseDir {title {init ""}} {
+    variable C
+    variable CD
+    set w .cdir
+    destroy $w
+    if {$init eq "" || ![file isdirectory $init]} {set init [pwd]}
+    set CD(path) [file normalize $init]
+    set CD(hidden) 0
+    set CD(done) 0
+    toplevel $w -background $C(ui)
+    wm title $w $title
+    wm transient $w .
+    ttk::frame $w.f -padding 10
+    ttk::frame $w.f.top
+    ttk::button $w.f.top.up -text ↑ -width 3 -command qc::cdUp
+    ttk::entry $w.f.top.e -textvariable ::qc::CD(path)
+    pack $w.f.top.up -side left
+    pack $w.f.top.e -side left -fill x -expand 1 -padx {6 0}
+    listbox $w.f.l -font TkDefaultFont -background $C(field) -foreground $C(edfg) \
+        -selectbackground $C(sel) -selectforeground #ffffff -bd 0 \
+        -highlightthickness 0 -activestyle none -exportselection 0 \
+        -yscrollcommand [list $w.f.sy set]
+    ttk::scrollbar $w.f.sy -orient vertical -command [list $w.f.l yview]
+    ttk::label $w.f.hint -foreground #8a8a8a \
+        -text "Duplo clique entra na pasta · Abrir usa a selecionada (ou a atual)"
+    ttk::frame $w.f.b
+    ttk::checkbutton $w.f.b.h -text "Mostrar ocultas" -variable ::qc::CD(hidden) \
+        -command {qc::cdGo $::qc::CD(path)}
+    ttk::button $w.f.b.ok -text Abrir -command qc::cdOk
+    ttk::button $w.f.b.c -text Cancelar -command {set ::qc::CD(done) 1}
+    pack $w.f.b.h -side left
+    pack $w.f.b.c $w.f.b.ok -side right -padx {6 0}
+    grid $w.f.top - -sticky ew -pady {0 6}
+    grid $w.f.l $w.f.sy -sticky nsew
+    grid $w.f.hint - -sticky w -pady {4 0}
+    grid $w.f.b - -sticky ew -pady {6 0}
+    grid columnconfigure $w.f 0 -weight 1
+    grid rowconfigure $w.f 1 -weight 1
+    pack $w.f -fill both -expand 1
+    bind $w.f.l <Double-1> {qc::cdEnter}
+    bind $w.f.l <Right> {qc::cdEnter}
+    bind $w.f.l <Left> {qc::cdUp}
+    bind $w.f.l <BackSpace> {qc::cdUp}
+    bind $w.f.l <Return> {qc::cdOk; break}
+    bind $w.f.top.e <Return> {qc::cdGo $::qc::CD(path); break}
+    bind $w <Escape> {set ::qc::CD(done) 1}
+    wm protocol $w WM_DELETE_WINDOW {set ::qc::CD(done) 1}
+    wm geometry $w 560x420+[expr {[winfo rootx .] + 120}]+[expr {[winfo rooty .] + 80}]
+    cdGo $CD(path)
+    focus $w.f.l
+    catch {grab $w}
+    set CD(result) ""
+    tkwait variable ::qc::CD(done)
+    destroy $w
+    return $CD(result)
+}
+
+proc qc::cdGo {dir {select ""}} {
+    variable CD
+    set l .cdir.f.l
+    set dir [file normalize $dir]
+    if {![file isdirectory $dir]} {bell; return}
+    set CD(path) $dir
+    set names {}
+    foreach p [glob -nocomplain -types d -directory $dir *] {lappend names [file tail $p]}
+    if {$CD(hidden)} {
+        foreach p [glob -nocomplain -types {d hidden} -directory $dir *] {
+            set n [file tail $p]
+            if {$n ni {. ..}} {lappend names $n}
+        }
+    }
+    $l delete 0 end
+    foreach n [lsort -dictionary $names] {$l insert end $n}
+    # nada fica selecionado: "Abrir" logo após entrar abre a pasta atual
+    set i [expr {$select eq "" ? -1 : [lsearch -exact [$l get 0 end] $select]}]
+    if {$i < 0 && [$l size]} {set i 0}
+    if {$i >= 0} {
+        $l activate $i
+        $l see $i
+    }
+}
+
+proc qc::cdUp {} {
+    variable CD
+    cdGo [file dirname $CD(path)] [file tail $CD(path)]
+}
+
+proc qc::cdEnter {} {
+    variable CD
+    set l .cdir.f.l
+    set i [lindex [$l curselection] 0]
+    if {$i eq ""} {set i [$l index active]}
+    if {$i eq "" || $i >= [$l size]} {return}
+    cdGo [file join $CD(path) [$l get $i]]
+}
+
+proc qc::cdOk {} {
+    variable CD
+    set l .cdir.f.l
+    set i [lindex [$l curselection] 0]
+    set CD(result) [expr {$i eq "" ? $CD(path) : [file join $CD(path) [$l get $i]]}]
+    set CD(done) 1
+}
+
 proc qc::openFolder {{dir ""}} {
     variable cfg
     if {$dir eq ""} {
-        set opts [list -parent . -title "Abrir pasta" -mustexist 1]
+        set opts {""}
         foreach d [list $cfg(folder) $cfg(lastdir)] {
-            if {$d ne "" && [file isdirectory $d]} {lappend opts -initialdir $d; break}
+            if {$d ne "" && [file isdirectory $d]} {lappend opts $d; break}
         }
-        set dir [tk_chooseDirectory {*}$opts]
+        set dir [chooseDir "Abrir pasta" [lindex $opts end]]
         if {$dir eq ""} {
             if {$cfg(folder) eq ""} {set cfg(sidebar) 0}
             return
         }
     }
+    if {![file isdirectory $dir]} {
+        treeError "A pasta não existe mais." $dir
+        set cfg(recentdirs) [lsearch -all -inline -not -exact $cfg(recentdirs) $dir]
+        updateRecentMenu
+        return
+    }
     set cfg(folder) [file normalize $dir]
     set cfg(lastdir) $cfg(folder)
     set ::qc::folderName [file tail $cfg(folder)]
+    addRecentDir $cfg(folder)
     fillDir {} $cfg(folder)
     showSide 1
     treeReveal
@@ -1317,7 +1679,7 @@ proc qc::editProjectFile {} {
         } elseif {$file ne ""} {
             set root [file dirname $file]
         } else {
-            set root [tk_chooseDirectory -parent . -title "Pasta do projeto" -mustexist 1]
+            set root [chooseDir "Pasta do projeto" $cfg(lastdir)]
             if {$root eq ""} {return}
         }
         set pf [file join $root $::qc::projName]
@@ -4438,18 +4800,29 @@ proc qc::addRecent {path} {
     updateRecentMenu
 }
 
+proc qc::addRecentDir {path} {
+    variable cfg
+    set l [lsearch -all -inline -not -exact $cfg(recentdirs) $path]
+    set cfg(recentdirs) [lrange [linsert $l 0 $path] 0 9]
+    updateRecentMenu
+}
+
 proc qc::updateRecentMenu {} {
     variable cfg
-    set m .mb.file.recent
-    $m delete 0 end
-    foreach p $cfg(recent) {
-        $m add command -label $p -command [list qc::openFile $p]
-    }
-    if {![llength $cfg(recent)]} {
-        $m add command -label "(vazio)" -state disabled
-    } else {
-        $m add separator
-        $m add command -label "Limpar lista" -command {set ::qc::cfg(recent) {}; qc::updateRecentMenu}
+    foreach {m key cmd} {.mb.file.recent recent qc::openFile
+                         .mb.file.recentdirs recentdirs qc::openFolder} {
+        if {![winfo exists $m]} {continue}
+        $m delete 0 end
+        foreach p $cfg($key) {
+            $m add command -label $p -command [list $cmd $p]
+        }
+        if {![llength $cfg($key)]} {
+            $m add command -label "(vazio)" -state disabled
+        } else {
+            $m add separator
+            $m add command -label "Limpar lista" \
+                -command [list apply {k {set ::qc::cfg($k) {}; qc::updateRecentMenu}} $key]
+        }
     }
 }
 
@@ -5602,6 +5975,7 @@ proc qc::showShortcuts {} {
         "Ctrl+Shift+S          Salvar como"
         "Ctrl+Shift+O          Abrir pasta"
         "Ctrl+B                Painel de arquivos"
+        "F2 / Del (no painel)  Renomear / excluir arquivo ou pasta"
         "Ctrl+Shift+M          Pré-visualização do Markdown"
         "Ctrl+Shift+E          Exportar Markdown para HTML"
         "Ctrl+' / Ctrl+`       Terminal"
