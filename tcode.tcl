@@ -103,26 +103,26 @@ namespace eval qc {
     array set find {pat "" rep "" case 0 regex 0}
     variable cfg
     array set cfg {
-        fontsize 12 wrap 0 autoclear 1 recent {} geometry 1100x800
+        fontsize 11 wrap 0 autoclear 1 recent {} geometry 1100x800
         lastdir "" lang "" folder "" sidebar 0 sidew 240 autocomp 1
         terminal 0 termpos side termcmd "" tabs {} tabcur "" hoverdef 1
         pretty 1 mdpreview 1 mdw 0
     }
     variable T ;# terminal embutido: T(chan), T(pid), T(shown)
     array set T {}
-    # Paleta escura (inspirada no Darcula)
+    # Paleta escura (inspirada no Darcula; editor igual ao Emacs timu-macos)
     variable C
     array set C {
-        ui       #3c3f41   uifg     #bbbbbb   uiactive #4c5052
-        field    #2b2b2b   border   #2b2b2b   trough   #313335
-        accent   #4b6eaf   sel      #214283   thumb    #5a5d5f
-        edbg     #2b2b2b   edfg     #a9b7c6   caret    #e0e0e0
-        gutbg    #313335   gutfg    #606366   gutcur   #a4a3a3
-        curline  #323438   found    #32593d   bmatch   #3b514d
+        ui       #202125   uifg     #bbbbbb   uiactive #393939
+        field    #222327   border   #222327   trough   #1c1d20
+        accent   #4b6eaf   sel      #214283   thumb    #3e4046
+        edbg     #222327   edfg     #ffffff   caret    #e0e0e0
+        gutbg    #222327   gutfg    #b3b3b3   gutcur   #ffffff
+        curline  #3e3e3e   found    #32593d   bmatch   #3b514d
         bbad     #7a2e2e   errline  #52302f   warnline #49442c
         conbg    #1e1f22   confg    #c8c8c8
         stderr   #ff6b68   warn     #e0c46c   info     #6f7f8f
-        result   #8fbf6a
+        result   #8fbf6a   thumbact #64666d
     }
     # Tags de destaque de sintaxe: cor e estilo (B negrito, I itálico)
     variable S {
@@ -255,7 +255,7 @@ proc qc::stripAnsi {s} {
 
 proc qc::pickFont {} {
     set fams [font families]
-    foreach f {"JetBrains Mono" "Fira Code" "Source Code Pro" "Cascadia Code"
+    foreach f {"Adwaita Mono" "JetBrains Mono" "Fira Code" "Source Code Pro" "Cascadia Code"
                "Hack" "DejaVu Sans Mono" "Liberation Mono" "Consolas" "Menlo"
                "Monaco" "Courier New"} {
         if {[lsearch -nocase -exact $fams $f] >= 0} {return $f}
@@ -278,7 +278,7 @@ proc qc::loadCfg {} {
             dict for {k v} [readFile $rc] {set cfg($k) $v}
         }
     }
-    if {![string is integer -strict $cfg(fontsize)]} {set cfg(fontsize) 12}
+    if {![string is integer -strict $cfg(fontsize)]} {set cfg(fontsize) 11}
 }
 
 proc qc::saveCfg {} {
@@ -298,6 +298,64 @@ proc qc::saveCfg {} {
 # ---------------------------------------------------------------------------
 # Tema
 # ---------------------------------------------------------------------------
+
+# Cor entre fg e bg, com fg na proporção a (0..1).
+proc qc::blend {fg bg a} {
+    lassign [winfo rgb . $fg] r1 g1 b1
+    lassign [winfo rgb . $bg] r2 g2 b2
+    format #%02x%02x%02x {*}[lmap c1 [list $r1 $g1 $b1] c2 [list $r2 $g2 $b2] {
+        expr {round(($c1 * $a + $c2 * (1 - $a)) / 257.0)}}]
+}
+
+# Imagem w x h de um retângulo com pontas arredondadas (raio = metade do lado
+# menor), já misturado ao fundo bg; a borda é suavizada por supersampling 4x4.
+proc qc::roundImg {w h fg bg} {
+    set img [image create photo -width $w -height $h]
+    set r [expr {min($w, $h) / 2.0}]
+    set rows {}
+    for {set y 0} {$y < $h} {incr y} {
+        set row {}
+        for {set x 0} {$x < $w} {incr x} {
+            set n 0
+            foreach sy {0.125 0.375 0.625 0.875} {
+                foreach sx {0.125 0.375 0.625 0.875} {
+                    set px [expr {$x + $sx}]
+                    set py [expr {$y + $sy}]
+                    set cx [expr {max($r, min($w - $r, $px))}]
+                    set cy [expr {max($r, min($h - $r, $py))}]
+                    if {hypot($px - $cx, $py - $cy) <= $r} {incr n}
+                }
+            }
+            lappend row [blend $fg $bg [expr {$n / 16.0}]]
+        }
+        lappend rows $row
+    }
+    $img put $rows
+    return $img
+}
+
+# Barra de rolagem fina, sem setas, com polegar arredondado sobre o fundo bg.
+# prefix "" redefine o estilo padrão; "Con." cria Con.Vertical.TScrollbar etc.
+proc qc::scrollStyle {prefix bg} {
+    variable C
+    set e Qc$prefix
+    set tr [image create photo -width 10 -height 10]
+    $tr put $bg -to 0 0 10 10
+    foreach o {Vertical Horizontal} {
+        if {$o eq "Vertical"} {
+            set wh {6 16}; set b {3 6 3 6}; set st ns; set dim -width
+        } else {
+            set wh {16 6}; set b {6 3 6 3}; set st we; set dim -height
+        }
+        set n [roundImg {*}$wh $C(thumb) $bg]
+        set a [roundImg {*}$wh $C(thumbact) $bg]
+        ttk::style element create $e.$o.Scrollbar.trough image $tr -border 0 $dim 10
+        ttk::style element create $e.$o.Scrollbar.thumb image \
+            [list $n active $a pressed $a] -border $b -sticky $st
+        ttk::style layout $prefix$o.TScrollbar [list $e.$o.Scrollbar.trough \
+            -sticky $st -children [list $e.$o.Scrollbar.thumb -expand 1]]
+    }
+}
 
 proc qc::setupTheme {} {
     variable C
@@ -348,10 +406,8 @@ proc qc::setupTheme {} {
         -indicatorforeground $C(uifg)
     ttk::style map TCheckbutton -indicatorbackground [list selected $C(accent)] \
         -background [list active $C(ui)]
-    ttk::style configure TScrollbar -background $C(thumb) -troughcolor $C(trough) \
-        -bordercolor $C(trough) -lightcolor $C(thumb) -darkcolor $C(thumb) \
-        -arrowcolor $C(uifg) -gripcount 0
-    ttk::style map TScrollbar -background [list active #6e7173]
+    scrollStyle "" $C(edbg)
+    scrollStyle Con. $C(conbg)
     ttk::style configure Sash -sashthickness 6 -gripcount 0 -background $C(ui)
     ttk::style configure Status.TLabel -padding {6 2} -foreground #9a9a9a
     ttk::style configure Head.TLabel -padding {6 2} -foreground #8a8a8a \
@@ -460,7 +516,8 @@ proc qc::buildUI {} {
         -selectforeground {} -inactiveselectbackground $C(sel) \
         -font QcMono -wrap char -bd 0 -highlightthickness 0 -padx 6 -pady 4 \
         -state disabled -cursor xterm -yscrollcommand [list $f.sy set]]
-    ttk::scrollbar $f.sy -orient vertical -command [list $con yview]
+    ttk::scrollbar $f.sy -orient vertical -style Con.Vertical.TScrollbar \
+        -command [list $con yview]
     grid $f.head - -sticky ew
     grid $con $f.sy -sticky nsew
     grid columnconfigure $f 0 -weight 1
@@ -3495,7 +3552,7 @@ proc qc::toggleComment {} {
 proc qc::zoom {d} {
     variable cfg
     if {$d == 0} {
-        set cfg(fontsize) 12
+        set cfg(fontsize) 11
     } else {
         set cfg(fontsize) [expr {max(6, min(48, $cfg(fontsize) + $d))}]
     }
