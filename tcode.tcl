@@ -48,11 +48,13 @@
 # extras de definição para o F12, com UM grupo = o nome; as palavras de
 # defWords já geram uma), docString (1 = string logo após a assinatura é
 # documentação, como em Scheme), pretty (palavra -> símbolo exibido no lugar
-# dela, ex.: {define λ}; o texto não muda) (ver langDefaults).
+# dela, ex.: {define λ}; o texto não muda), linters e formatters
+# (ferramentas externas; ver "Verificação (linter) e formatação") (ver
+# langDefaults).
 # Hooks opcionais: procs em ::qc::lang::<id>:: -- init, wordTag, prepare,
-# defaultExt, newlineIndent, stderrLine, findExe, apiSources, apiParse,
-# defQual (ver as embutidas; as três últimas montam o índice de biblioteca
-# usado na dica e no F12).
+# defaultExt, newlineIndent, stderrLine, findExe, reformat (formatador
+# embutido), apiSources, apiParse, defQual (ver as embutidas; as três
+# últimas montam o índice de biblioteca usado na dica e no F12).
 # Tags de cor disponíveis: veja qc::S; "styles" define novas.
 
 package require Tk 8.6-
@@ -60,14 +62,14 @@ package require Tk 8.6-
 namespace eval qc {
     variable version 2.0
     variable scriptPath [file normalize [info script]]
-    variable ed  ""          ;# editor da aba ativa
-    variable tabs {}         ;# editores abertos (um widget text por aba), em ordem
-    variable TB              ;# TB(<editor>,file|lang|hltags): estado de cada aba
+    variable ed "" ;# editor da aba ativa
+    variable tabs {} ;# editores abertos (um widget text por aba), em ordem
+    variable TB ;# TB(<editor>,file|lang|hltags): estado de cada aba
     array set TB {}
     variable tabSeq 0
-    variable con ""          ;# console de saída
-    variable gut ""          ;# canvas com números de linha
-    variable file ""         ;# arquivo atual ("" = sem nome)
+    variable con "" ;# console de saída
+    variable gut "" ;# canvas com números de linha
+    variable file "" ;# arquivo atual ("" = sem nome)
     variable status ""
     variable lncol ""
     variable folderName ""
@@ -76,25 +78,25 @@ namespace eval qc {
     variable gutPending 0
     variable curPending 0
     variable linkSeq 0
-    variable mcur {}          ;# ids dos cursores extras (multi-cursor)
+    variable mcur {} ;# ids dos cursores extras (multi-cursor)
     variable mseq 0
-    variable mlast ""         ;# último cursor adicionado com Ctrl+D
-    variable mword ""         ;# seleção criada pelo Ctrl+D sem seleção (busca palavras inteiras)
+    variable mlast "" ;# último cursor adicionado com Ctrl+D
+    variable mword "" ;# seleção criada pelo Ctrl+D sem seleção (busca palavras inteiras)
     variable mapplying 0
-    variable mcol 0           ;# coluna usada pelo Shift+Alt+↑/↓
+    variable mcol 0 ;# coluna usada pelo Shift+Alt+↑/↓
     variable atomicDepth 0
-    variable langs {}         ;# ids das linguagens, em ordem de registro
-    variable L                ;# L(<id>) = dicionário da linguagem
+    variable langs {} ;# ids das linguagens, em ordem de registro
+    variable L ;# L(<id>) = dicionário da linguagem
     array set L {}
-    variable lang ""          ;# linguagem corrente
+    variable lang "" ;# linguagem corrente
     variable langName ""
-    variable H                ;# dados compilados da linguagem corrente
+    variable H ;# dados compilados da linguagem corrente
     array set H {tags {}}
     variable inited {}
-    variable V                ;# versões detectadas: V(<lang>,<runner>)
+    variable V ;# versões detectadas: V(<lang>,<runner>)
     array set V {}
     variable loadErrors {}
-    variable R                ;# estado da execução corrente
+    variable R ;# estado da execução corrente
     array set R {}
     variable find
     array set find {pat "" rep "" case 0 regex 0}
@@ -105,7 +107,7 @@ namespace eval qc {
         terminal 0 termpos side termcmd "" tabs {} tabcur "" hoverdef 1
         pretty 1
     }
-    variable T                ;# terminal embutido: T(chan), T(pid), T(shown)
+    variable T ;# terminal embutido: T(chan), T(pid), T(shown)
     array set T {}
     # Paleta escura (inspirada no Darcula)
     variable C
@@ -116,7 +118,7 @@ namespace eval qc {
         edbg     #2b2b2b   edfg     #a9b7c6   caret    #e0e0e0
         gutbg    #313335   gutfg    #606366   gutcur   #a4a3a3
         curline  #323438   found    #32593d   bmatch   #3b514d
-        bbad     #7a2e2e   errline  #52302f
+        bbad     #7a2e2e   errline  #52302f   warnline #49442c
         conbg    #1e1f22   confg    #c8c8c8
         stderr   #ff6b68   warn     #e0c46c   info     #6f7f8f
         result   #8fbf6a
@@ -137,7 +139,7 @@ namespace eval qc {
         sub {} styles {} indentAfter {[\{\[\(]\s*$} dedentChars "\}\)\]"
         runners {} errPatterns {} col0 0 infoRe "" warnRe "" grayInfo 0
         templates {} autoPairs {() [] \{\} \"\" ''} rainbow 0 defPatterns {}
-        docString 0 pretty {}
+        docString 0 pretty {} linters {} formatters {}
     }
     namespace eval lang {}
 }
@@ -150,7 +152,7 @@ proc qc::language {id def} {
     variable langs
     variable L
     variable langDefaults
-    if {$id ni $langs} { lappend langs $id }
+    if {$id ni $langs} {lappend langs $id}
     set L($id) [dict merge $langDefaults $def]
     namespace eval ::qc::lang::$id {}
 }
@@ -163,7 +165,7 @@ proc qc::template {id label text} {
 }
 
 proc qc::ldict {{id ""}} {
-    if {$id eq ""} { set id $::qc::lang }
+    if {$id eq ""} {set id $::qc::lang}
     return $::qc::L($id)
 }
 
@@ -172,7 +174,7 @@ proc qc::lget {key {id ""}} {
 }
 
 proc qc::hook {name {id ""}} {
-    if {$id eq ""} { set id $::qc::lang }
+    if {$id eq ""} {set id $::qc::lang}
     set p ::qc::lang::${id}::$name
     return [expr {[info commands $p] ne "" ? $p : ""}]
 }
@@ -180,7 +182,7 @@ proc qc::hook {name {id ""}} {
 proc qc::loadLanguageFiles {} {
     variable loadErrors
     set dirs [list [file join [file dirname $::qc::scriptPath] lang] \
-                   [file join [homeDir] .config qconsole lang]]
+        [file join [homeDir] .config qconsole lang]]
     foreach d $dirs {
         foreach f [lsort [glob -nocomplain -directory $d *.tcl]] {
             if {[catch {uplevel #0 [list source -encoding utf-8 $f]} err]} {
@@ -195,20 +197,20 @@ proc qc::loadLanguageFiles {} {
 # ---------------------------------------------------------------------------
 
 proc qc::homeDir {} {
-    if {![catch {file home} h]} { return $h }
+    if {![catch {file home} h]} {return $h}
     foreach v {HOME USERPROFILE} {
-        if {[info exists ::env($v)]} { return $::env($v) }
+        if {[info exists ::env($v)]} {return $::env($v)}
     }
     return [pwd]
 }
 
 proc qc::tmpDir {} {
     variable tmpdir
-    if {[info exists tmpdir] && [file isdirectory $tmpdir]} { return $tmpdir }
-    if {![catch {file tempdir} d]} { return [set tmpdir $d] }
+    if {[info exists tmpdir] && [file isdirectory $tmpdir]} {return $tmpdir}
+    if {![catch {file tempdir} d]} {return [set tmpdir $d]}
     set base /tmp
     foreach v {TMPDIR TEMP TMP} {
-        if {[info exists ::env($v)]} { set base $::env($v); break }
+        if {[info exists ::env($v)]} {set base $::env($v); break}
     }
     set tmpdir [file join $base qconsole-[pid]-[clock clicks]]
     file mkdir $tmpdir
@@ -217,7 +219,7 @@ proc qc::tmpDir {} {
 
 proc qc::setEncoding {chan} {
     fconfigure $chan -encoding utf-8
-    catch {fconfigure $chan -profile replace}   ;# Tcl 9
+    catch {fconfigure $chan -profile replace} ;# Tcl 9
 }
 
 proc qc::readFile {path} {
@@ -242,7 +244,7 @@ proc qc::reQuote {s} {
 # Converte uma string de opções em lista (aceita sintaxe de lista Tcl para
 # argumentos com espaços; senão divide nos espaços).
 proc qc::splitArgs {s} {
-    if {[catch {llength $s}]} { return [regexp -all -inline {\S+} $s] }
+    if {[catch {llength $s}]} {return [regexp -all -inline {\S+} $s]}
     return $s
 }
 
@@ -255,7 +257,7 @@ proc qc::pickFont {} {
     foreach f {"JetBrains Mono" "Fira Code" "Source Code Pro" "Cascadia Code"
                "Hack" "DejaVu Sans Mono" "Liberation Mono" "Consolas" "Menlo"
                "Monaco" "Courier New"} {
-        if {[lsearch -nocase -exact $fams $f] >= 0} { return $f }
+        if {[lsearch -nocase -exact $fams $f] >= 0} {return $f}
     }
     return [font actual TkFixedFont -family]
 }
@@ -263,7 +265,7 @@ proc qc::pickFont {} {
 # Configurações por linguagem ficam em cfg(<chave>.<lang>).
 proc qc::lcfg {key {id ""}} {
     variable cfg
-    if {$id eq ""} { set id $::qc::lang }
+    if {$id eq ""} {set id $::qc::lang}
     return [expr {[info exists cfg($key.$id)] ? $cfg($key.$id) : ""}]
 }
 
@@ -272,10 +274,10 @@ proc qc::loadCfg {} {
     set rc [file join [homeDir] .qconsolerc]
     if {[file readable $rc]} {
         catch {
-            dict for {k v} [readFile $rc] { set cfg($k) $v }
+            dict for {k v} [readFile $rc] {set cfg($k) $v}
         }
     }
-    if {![string is integer -strict $cfg(fontsize)]} { set cfg(fontsize) 12 }
+    if {![string is integer -strict $cfg(fontsize)]} {set cfg(fontsize) 12}
 }
 
 proc qc::saveCfg {} {
@@ -284,11 +286,11 @@ proc qc::saveCfg {} {
         set cfg(geometry) [wm geometry .]
     }
     catch {
-        if {".side" in [.hp panes]} { set cfg(sidew) [.hp sashpos 0] }
+        if {".side" in [.hp panes]} {set cfg(sidew) [.hp sashpos 0]}
     }
     set out ""
-    foreach k [lsort [array names cfg]] { append out [list $k $cfg($k)] \n }
-    catch { writeFile [file join [homeDir] .qconsolerc] $out }
+    foreach k [lsort [array names cfg]] {append out [list $k $cfg($k)] \n}
+    catch {writeFile [file join [homeDir] .qconsolerc] $out}
 }
 
 # ---------------------------------------------------------------------------
@@ -299,7 +301,7 @@ proc qc::setupTheme {} {
     variable C
     variable cfg
     set fam [pickFont]
-    font create QcMono  -family $fam -size $cfg(fontsize)
+    font create QcMono -family $fam -size $cfg(fontsize)
     font create QcMonoB -family $fam -size $cfg(fontsize) -weight bold
     font create QcMonoI -family $fam -size $cfg(fontsize) -slant italic
 
@@ -440,7 +442,7 @@ proc qc::buildUI {} {
     grid columnconfigure $f 1 -weight 1
     grid rowconfigure $f 1 -weight 1
     grid remove $f.find
-    if {$cfg(wrap)} { grid remove $f.sx }
+    if {$cfg(wrap)} {grid remove $f.sx}
 
     # parte de baixo: saída | terminal (lado a lado ou um no lugar do outro)
     ttk::panedwindow .pw.bot -orient horizontal
@@ -495,7 +497,7 @@ proc qc::buildUI {} {
 
 proc qc::initSash {} {
     set h [winfo height .pw]
-    if {$h > 50} { catch {.pw sashpos 0 [expr {int($h * 0.70)}]} }
+    if {$h > 50} {catch {.pw sashpos 0 [expr {int($h * 0.70)}]}}
 }
 
 proc qc::buildMenus {} {
@@ -506,48 +508,54 @@ proc qc::buildMenus {} {
 
     set m [menu .mb.file -tearoff 0]
     .mb add cascade -label Arquivo -menu $m
-    $m add command -label "Novo"               -accelerator Ctrl+N       -command qc::newFile
+    $m add command -label "Novo" -accelerator Ctrl+N -command qc::newFile
     $m add cascade -label "Novo a partir de modelo" -menu [menu $m.tpl -tearoff 0]
-    $m add command -label "Abrir…"             -accelerator Ctrl+O       -command qc::openFile
-    $m add cascade -label "Recentes"           -menu [menu $m.recent -tearoff 0]
-    $m add command -label "Abrir pasta…"       -accelerator Ctrl+Shift+O -command qc::openFolder
-    $m add command -label "Fechar pasta"                                 -command qc::closeFolder
+    $m add command -label "Abrir…" -accelerator Ctrl+O -command qc::openFile
+    $m add cascade -label "Recentes" -menu [menu $m.recent -tearoff 0]
+    $m add command -label "Abrir pasta…" -accelerator Ctrl+Shift+O -command qc::openFolder
+    $m add command -label "Fechar pasta" -command qc::closeFolder
     $m add separator
-    $m add command -label "Salvar"             -accelerator Ctrl+S       -command qc::save
-    $m add command -label "Salvar como…"       -accelerator Ctrl+Shift+S -command qc::saveAs
-    $m add command -label "Fechar aba"         -accelerator Ctrl+F4      -command qc::closeFile
-    $m add command -label "Próxima aba"        -accelerator Ctrl+Tab     -command {qc::cycleTab 1}
-    $m add command -label "Aba anterior"       -accelerator Ctrl+Shift+Tab -command {qc::cycleTab -1}
+    $m add command -label "Salvar" -accelerator Ctrl+S -command qc::save
+    $m add command -label "Salvar como…" -accelerator Ctrl+Shift+S -command qc::saveAs
+    $m add command -label "Fechar aba" -accelerator Ctrl+F4 -command qc::closeFile
+    $m add command -label "Próxima aba" -accelerator Ctrl+Tab -command {qc::cycleTab 1}
+    $m add command -label "Aba anterior" -accelerator Ctrl+Shift+Tab -command {qc::cycleTab -1}
     $m add separator
-    $m add command -label "Sair"               -accelerator Ctrl+Q       -command qc::quit
+    $m add command -label "Sair" -accelerator Ctrl+Q -command qc::quit
     updateRecentMenu
 
     set m [menu .mb.edit -tearoff 0]
     .mb add cascade -label Editar -menu $m
-    $m add command -label "Desfazer"           -accelerator Ctrl+Z       -command {qc::editCmd undo}
-    $m add command -label "Refazer"            -accelerator Ctrl+Y       -command {qc::editCmd redo}
+    $m add command -label "Desfazer" -accelerator Ctrl+Z -command {qc::editCmd undo}
+    $m add command -label "Refazer" -accelerator Ctrl+Y -command {qc::editCmd redo}
     $m add separator
-    $m add command -label "Recortar"           -accelerator Ctrl+X       -command {event generate $::qc::ed <<Cut>>}
-    $m add command -label "Copiar"             -accelerator Ctrl+C       -command {event generate [focus] <<Copy>>}
-    $m add command -label "Colar"              -accelerator Ctrl+V       -command {qc::paste $::qc::ed}
-    $m add command -label "Selecionar tudo"    -accelerator Ctrl+A       -command {qc::selectAll $::qc::ed}
+    $m add command -label "Recortar" -accelerator Ctrl+X -command {event generate $::qc::ed <<Cut>>}
+    $m add command -label "Copiar" -accelerator Ctrl+C -command {event generate [focus] <<Copy>>}
+    $m add command -label "Colar" -accelerator Ctrl+V -command {qc::paste $::qc::ed}
+    $m add command -label "Selecionar tudo" -accelerator Ctrl+A -command {qc::selectAll $::qc::ed}
     $m add separator
-    $m add command -label "Duplicar linha"     -accelerator Ctrl+Shift+D -command qc::duplicateLine
-    $m add command -label "Comentar/descomentar" -accelerator Ctrl+/     -command qc::toggleComment
+    $m add command -label "Duplicar linha" -accelerator Ctrl+Shift+D -command qc::duplicateLine
+    $m add command -label "Mover linha para cima" -accelerator Ctrl+Shift+↑ -command {qc::moveLines -1}
+    $m add command -label "Mover linha para baixo" -accelerator Ctrl+Shift+↓ -command {qc::moveLines 1}
+    $m add command -label "Comentar/descomentar" -accelerator Ctrl+/ -command qc::toggleComment
+    $m add command -label "Formatar código" -accelerator Ctrl+Shift+F -command qc::formatCode
+    $m add checkbutton -label "Formatar ao salvar"
+    $m add command -label "Verificar código (linter)" -accelerator F8 -command qc::lint
     $m add separator
-    $m add command -label "Completar palavra"  -accelerator Ctrl+Espaço  -command {focus $::qc::ed; qc::acShow 1}
+    $m add command -label "Completar palavra" -accelerator Ctrl+Espaço -command {focus $::qc::ed; qc::acShow 1}
     $m add checkbutton -label "Sugerir ao digitar" -variable ::qc::cfg(autocomp)
     $m add separator
     $m add command -label "Selecionar próxima ocorrência" -accelerator Ctrl+D -command {focus $::qc::ed; qc::selectNext}
-    $m add command -label "Selecionar todas as ocorrências" -accelerator Alt+F3 -command {focus $::qc::ed; qc::selectAllOcc}
+    $m add command -label "Selecionar todas as ocorrências" -accelerator Alt+F3 \
+        -command {focus $::qc::ed; qc::selectAllOcc}
     $m add separator
-    $m add command -label "Localizar…"         -accelerator Ctrl+F       -command {qc::showFind 0}
-    $m add command -label "Substituir…"        -accelerator Ctrl+H       -command {qc::showFind 1}
-    $m add command -label "Localizar próximo"  -accelerator F3           -command {qc::findNext 1}
-    $m add command -label "Localizar anterior" -accelerator Shift+F3     -command {qc::findNext 0}
-    $m add command -label "Ir para linha…"     -accelerator Ctrl+L       -command qc::gotoDialog
-    $m add command -label "Ir para definição"  -accelerator F12          -command qc::goToDefinition
-    $m add command -label "Voltar"             -accelerator Alt+←        -command qc::navBack
+    $m add command -label "Localizar…" -accelerator Ctrl+F -command {qc::showFind 0}
+    $m add command -label "Substituir…" -accelerator Ctrl+H -command {qc::showFind 1}
+    $m add command -label "Localizar próximo" -accelerator F3 -command {qc::findNext 1}
+    $m add command -label "Localizar anterior" -accelerator Shift+F3 -command {qc::findNext 0}
+    $m add command -label "Ir para linha…" -accelerator Ctrl+L -command qc::gotoDialog
+    $m add command -label "Ir para definição" -accelerator F12 -command qc::goToDefinition
+    $m add command -label "Voltar" -accelerator Alt+← -command qc::navBack
 
     set m [menu .mb.lang -tearoff 0]
     .mb add cascade -label Linguagem -menu $m
@@ -558,24 +566,24 @@ proc qc::buildMenus {} {
 
     set m [menu .mb.script -tearoff 0]
     .mb add cascade -label Executar -menu $m
-    $m add command -label "Executar"           -accelerator Ctrl+R       -command {qc::run 0}
-    $m add command -label "Executar seleção"   -accelerator Ctrl+Shift+R -command {qc::run 1}
-    $m add command -label "Interromper"        -accelerator Ctrl+Break   -command qc::stop -state disabled
+    $m add command -label "Executar" -accelerator Ctrl+R -command {qc::run 0}
+    $m add command -label "Executar seleção" -accelerator Ctrl+Shift+R -command {qc::run 1}
+    $m add command -label "Interromper" -accelerator Ctrl+Break -command qc::stop -state disabled
     $m add command -label "Executar comando do projeto" -accelerator Ctrl+Alt+R -command qc::runMain
     $m add cascade -label "Comandos do projeto" -menu [menu $m.proj -tearoff 0 \
         -postcommand qc::updateProjMenu]
     $m add command -label "Editar comandos do projeto (.qconsole)" -command qc::editProjectFile
     $m add separator
-    $m add command -label "Limpar saída"       -accelerator Ctrl+W       -command qc::clearConsole
+    $m add command -label "Limpar saída" -accelerator Ctrl+W -command qc::clearConsole
     $m add checkbutton -label "Limpar saída antes de executar" -variable ::qc::cfg(autoclear)
     $m add separator
-    $m add command -label "Opções de execução…" -accelerator Ctrl+E      -command qc::optionsDialog
+    $m add command -label "Opções de execução…" -accelerator Ctrl+E -command qc::optionsDialog
 
     set m [menu .mb.view -tearoff 0]
     .mb add cascade -label Exibir -menu $m
-    $m add command -label "Aumentar fonte"     -accelerator Ctrl++       -command {qc::zoom 1}
-    $m add command -label "Diminuir fonte"     -accelerator Ctrl+-       -command {qc::zoom -1}
-    $m add command -label "Fonte padrão"       -accelerator Ctrl+0       -command {qc::zoom 0}
+    $m add command -label "Aumentar fonte" -accelerator Ctrl++ -command {qc::zoom 1}
+    $m add command -label "Diminuir fonte" -accelerator Ctrl+- -command {qc::zoom -1}
+    $m add command -label "Fonte padrão" -accelerator Ctrl+0 -command {qc::zoom 0}
     $m add separator
     $m add checkbutton -label "Quebra de linha" -variable ::qc::cfg(wrap) -command qc::applyWrap
     $m add checkbutton -label "Mostrar definição ao passar o mouse" -variable ::qc::cfg(hoverdef) \
@@ -595,25 +603,28 @@ proc qc::buildMenus {} {
 
     set m [menu .mb.help -tearoff 0]
     .mb add cascade -label Ajuda -menu $m
-    $m add command -label "Atalhos"  -command qc::showShortcuts
-    $m add command -label "Sobre"    -command qc::about
+    $m add command -label "Atalhos" -command qc::showShortcuts
+    $m add command -label "Sobre" -command qc::about
 
     # menus de contexto
     set m [menu .edpop -tearoff 0]
     $m add command -label "Ir para definição" -accelerator F12 -command qc::goToDefinition
     $m add separator
-    $m add command -label "Recortar"         -command {event generate $::qc::ed <<Cut>>}
-    $m add command -label "Copiar"           -command {event generate $::qc::ed <<Copy>>}
-    $m add command -label "Colar"            -command {qc::paste $::qc::ed}
+    $m add command -label "Recortar" -command {event generate $::qc::ed <<Cut>>}
+    $m add command -label "Copiar" -command {event generate $::qc::ed <<Copy>>}
+    $m add command -label "Colar" -command {qc::paste $::qc::ed}
     $m add separator
-    $m add command -label "Selecionar tudo"  -command {qc::selectAll $::qc::ed}
+    $m add command -label "Selecionar tudo" -command {qc::selectAll $::qc::ed}
     $m add command -label "Executar seleção" -command {qc::run 1}
+    $m add separator
+    $m add command -label "Formatar código" -accelerator Ctrl+Shift+F -command qc::formatCode
+    $m add command -label "Verificar código (linter)" -accelerator F8 -command qc::lint
 
     set m [menu .conpop -tearoff 0]
-    $m add command -label "Copiar"           -command {event generate $::qc::con <<Copy>>}
-    $m add command -label "Selecionar tudo"  -command {$::qc::con tag add sel 1.0 end}
+    $m add command -label "Copiar" -command {event generate $::qc::con <<Copy>>}
+    $m add command -label "Selecionar tudo" -command {$::qc::con tag add sel 1.0 end}
     $m add separator
-    $m add command -label "Limpar saída"     -command qc::clearConsole
+    $m add command -label "Limpar saída" -command qc::clearConsole
 }
 
 proc qc::updateTemplateMenu {} {
@@ -636,7 +647,7 @@ proc qc::buildFindBar {w} {
     ttk::button $w.prev -text "▲" -width 3 -command {qc::findNext 0} -takefocus 0
     ttk::button $w.next -text "▼" -width 3 -command {qc::findNext 1} -takefocus 0
     ttk::checkbutton $w.case -text "Aa" -variable ::qc::find(case) -command qc::markAll -takefocus 0
-    ttk::checkbutton $w.re   -text ".*" -variable ::qc::find(regex) -command qc::markAll -takefocus 0
+    ttk::checkbutton $w.re -text ".*" -variable ::qc::find(regex) -command qc::markAll -takefocus 0
     ttk::label $w.l2 -text "Substituir:"
     ttk::entry $w.rep -textvariable ::qc::find(rep) -width 22
     ttk::button $w.r1 -text "Substituir" -command qc::replaceOne -takefocus 0
@@ -651,23 +662,24 @@ proc qc::buildFindBar {w} {
 
     trace add variable ::qc::find(pat) write {apply {args {after idle qc::markAll}}}
     foreach e [list $w.pat $w.rep] {
-        bind $e <Return>       {qc::findNext 1; break}
+        bind $e <Return> {qc::findNext 1; break}
         bind $e <Shift-Return> {qc::findNext 0; break}
-        bind $e <Escape>       {qc::hideFind; break}
+        bind $e <Escape> {qc::hideFind; break}
     }
 }
 
 # Tags fixas de um editor (as de sintaxe vêm da linguagem).
 proc qc::setupEdTags {ed} {
     variable C
-    $ed tag configure curline   -background $C(curline)
-    $ed tag configure errline   -background $C(errline)
-    $ed tag configure found     -background $C(found)
-    $ed tag configure bmatch    -background $C(bmatch) -font QcMonoB
-    $ed tag configure bbad      -background $C(bbad)
-    $ed tag configure msel      -background $C(sel)
-    $ed tag configure deflink   -underline 1
-    $ed tag configure pel       -elide 1
+    $ed tag configure curline -background $C(curline)
+    $ed tag configure errline -background $C(errline)
+    $ed tag configure warnline -background $C(warnline)
+    $ed tag configure found -background $C(found)
+    $ed tag configure bmatch -background $C(bmatch) -font QcMonoB
+    $ed tag configure bbad -background $C(bbad)
+    $ed tag configure msel -background $C(sel)
+    $ed tag configure deflink -underline 1
+    $ed tag configure pel -elide 1
     $ed tag lower curline
 }
 
@@ -677,10 +689,10 @@ proc qc::setupTags {} {
     variable C
     $con tag configure stdout -foreground $C(confg)
     $con tag configure stderr -foreground $C(stderr)
-    $con tag configure warn   -foreground $C(warn)
+    $con tag configure warn -foreground $C(warn)
     $con tag configure result -foreground $C(result)
-    $con tag configure info   -foreground $C(info) -font QcMonoI
-    $con tag configure link   -underline 1
+    $con tag configure info -foreground $C(info) -font QcMonoI
+    $con tag configure link -underline 1
     $con tag bind link <Enter> [list $con configure -cursor hand2]
     $con tag bind link <Leave> [list $con configure -cursor xterm]
     # cores ANSI na saída do programa
@@ -733,6 +745,8 @@ proc qc::setupBindings {} {
         <Shift-F3>          {qc::findNext 0}
         <Alt-F3>            {focus $::qc::ed; qc::selectAllOcc}
         <Control-l>         qc::gotoDialog
+        <Control-F>         qc::formatCode
+        <F8>                qc::lint
         <F12>               qc::goToDefinition
         <Alt-Left>          qc::navBack
         <Control-plus>      {qc::zoom 1}
@@ -750,62 +764,64 @@ proc qc::setupBindings {} {
     event add <<Redo>> <Control-y>
 
     # teclas específicas do editor
-    bind QcEdit <Tab>           {qc::indent 1; break}
-    bind QcEdit <Shift-Tab>     {qc::indent 0; break}
+    bind QcEdit <Tab> {qc::indent 1; break}
+    bind QcEdit <Shift-Tab> {qc::indent 0; break}
     catch {bind QcEdit <ISO_Left_Tab> {qc::indent 0; break}}
-    bind QcEdit <Return>        {qc::newline; break}
-    bind QcEdit <KP_Enter>      {qc::newline; break}
-    bind QcEdit <KeyPress>      {if {[qc::keyChar %A %s]} break}
-    bind QcEdit <BackSpace>     {qc::backspace; break}
+    bind QcEdit <Return> {qc::newline; break}
+    bind QcEdit <KP_Enter> {qc::newline; break}
+    bind QcEdit <KeyPress> {if {[qc::keyChar %A %s]} break}
+    bind QcEdit <BackSpace> {qc::backspace; break}
     # com seleção, ←/→ vão para o início/fim dela
-    bind QcEdit <Left>          {if {[qc::selJump Left %s]} break}
-    bind QcEdit <Right>         {if {[qc::selJump Right %s]} break}
+    bind QcEdit <Left> {if {[qc::selJump Left %s]} break}
+    bind QcEdit <Right> {if {[qc::selJump Right %s]} break}
     # Home vai ao primeiro caractere não branco (Shift+Home seleciona até ele)
-    bind QcEdit <Home>          {qc::moveCaret Home 0; %W see insert; break}
-    bind QcEdit <Shift-Home>    {qc::moveCaret Home 1; %W see insert; break}
-    bind QcEdit <Control-d>     {qc::selectNext; break}
-    bind QcEdit <Control-D>     {qc::duplicateLine; break}
-    bind QcEdit <Shift-Alt-Up>   {qc::addCaretLine -1; break}
+    bind QcEdit <Home> {qc::moveCaret Home 0; %W see insert; break}
+    bind QcEdit <Shift-Home> {qc::moveCaret Home 1; %W see insert; break}
+    bind QcEdit <Control-d> {qc::selectNext; break}
+    bind QcEdit <Control-D> {qc::duplicateLine; break}
+    bind QcEdit <Control-Shift-Up> {qc::moveLines -1; break}
+    bind QcEdit <Control-Shift-Down> {qc::moveLines 1; break}
+    bind QcEdit <Shift-Alt-Up> {qc::addCaretLine -1; break}
     bind QcEdit <Shift-Alt-Down> {qc::addCaretLine 1; break}
     bind QcEdit <Control-slash> {qc::toggleComment; break}
-    bind QcEdit <<Paste>>       {qc::paste %W; break}
+    bind QcEdit <<Paste>> {qc::paste %W; break}
     bind QcEdit <Control-MouseWheel> {qc::zoom [expr {%D > 0 ? 1 : -1}]; break}
-    bind QcEdit <Button-3>      {qc::edPopup %W %x %y %X %Y; break}
-    bind QcEdit <<Undo>>        {qc::editCmd undo; break}
-    bind QcEdit <<Redo>>        {qc::editCmd redo; break}
+    bind QcEdit <Button-3> {qc::edPopup %W %x %y %X %Y; break}
+    bind QcEdit <<Undo>> {qc::editCmd undo; break}
+    bind QcEdit <<Redo>> {qc::editCmd redo; break}
 
     # QcMulti vem antes de tudo: com vários cursores ativos, aplica a tecla
     # em cada um deles
     # QcComp vem antes de tudo: com o popup de sugestões aberto, as setas,
     # Enter, Tab e Esc são dele
-    bind QcComp <KeyPress>        {qc::acKey %K %A %s}
-    bind QcComp <Control-space>   {qc::acShow 1; break}
-    bind QcComp <Button>          {qc::acHide}
-    bind QcComp <MouseWheel>      {qc::acHide}
-    bind QcComp <FocusOut>        {qc::acHide}
-    bind QcComp <Configure>       {qc::acHide}
+    bind QcComp <KeyPress> {qc::acKey %K %A %s}
+    bind QcComp <Control-space> {qc::acShow 1; break}
+    bind QcComp <Button> {qc::acHide}
+    bind QcComp <MouseWheel> {qc::acHide}
+    bind QcComp <FocusOut> {qc::acHide}
+    bind QcComp <Configure> {qc::acHide}
 
     # dica com a definição da palavra sob o mouse
-    bind QcHover <Motion>     {qc::hoverSched %W %x %y %s}
-    bind QcHover <Leave>      {qc::tipHide; qc::linkClear}
-    bind QcHover <FocusOut>   qc::linkClear
+    bind QcHover <Motion> {qc::hoverSched %W %x %y %s}
+    bind QcHover <Leave> {qc::tipHide; qc::linkClear}
+    bind QcHover <FocusOut> qc::linkClear
     # Ctrl sobre um nome com definição: sublinhado (Ctrl+clique vai até ela)
     foreach k {Control_L Control_R} {
-        bind QcHover <KeyPress-$k>   {qc::tipHide; qc::linkAtPointer %W}
+        bind QcHover <KeyPress-$k> {qc::tipHide; qc::linkAtPointer %W}
         bind QcHover <KeyRelease-$k> qc::linkClear
     }
-    bind QcHover <KeyPress>   qc::tipHide
-    bind QcHover <Button>     qc::tipHide
+    bind QcHover <KeyPress> qc::tipHide
+    bind QcHover <Button> qc::tipHide
     bind QcHover <MouseWheel> qc::tipHide
 
-    bind QcMulti <KeyPress>          {qc::multiKey %K %A %s}
-    bind QcMulti <Button-1>          {qc::multiClear}
-    bind QcMulti <Button-2>          {qc::multiClear}
+    bind QcMulti <KeyPress> {qc::multiKey %K %A %s}
+    bind QcMulti <Button-1> {qc::multiClear}
+    bind QcMulti <Button-2> {qc::multiClear}
     # Ctrl+clique num nome com definição vai até ela; fora disso (ou com
     # Alt+clique) adiciona um cursor
-    bind QcMulti <Control-Button-1>  {qc::ctrlClick %W %x %y; break}
-    bind QcMulti <Alt-Button-1>      {qc::addCaretAt %x %y; break}
-    bind QcMulti <<Paste>>           {if {[llength $::qc::mcur]} {qc::multiApply {qc::paste $::qc::ed}; break}}
+    bind QcMulti <Control-Button-1> {qc::ctrlClick %W %x %y; break}
+    bind QcMulti <Alt-Button-1> {qc::addCaretAt %x %y; break}
+    bind QcMulti <<Paste>> {if {[llength $::qc::mcur]} {qc::multiApply {qc::paste $::qc::ed}; break}}
 
     bindtags $con [list $con QcKeys Text . all]
     foreach e {.pw.ed.find.pat .pw.ed.find.rep} {
@@ -837,14 +853,14 @@ proc qc::edProxy {w args} {
     if {[catch {::qc::raw$w {*}$args} r o]} {
         return -code error -errorcode [dict get $o -errorcode] $r
     }
-    if {$w ne $::qc::ed} { return $r }
+    if {$w ne $::qc::ed} {return $r}
     switch -- [lindex $args 0] {
-        insert - delete - replace { onChange }
+        insert - delete - replace {onChange}
         edit {
-            if {[lindex $args 1] in {undo redo}} { onChange }
+            if {[lindex $args 1] in {undo redo}} {onChange}
         }
         mark {
-            if {[lindex $args 1] eq "set" && [lindex $args 2] eq "insert"} { onCursor }
+            if {[lindex $args 1] eq "set" && [lindex $args 2] eq "insert"} {onCursor}
         }
     }
     return $r
@@ -874,14 +890,14 @@ proc qc::buildSide {} {
     grid columnconfigure .side 0 -weight 1
     grid rowconfigure .side 1 -weight 1
     $t tag configure dir -foreground $::qc::C(uifg)
-    bind $t <<TreeviewOpen>>  {qc::treeFill [.side.t focus]}
+    bind $t <<TreeviewOpen>> {qc::treeFill [.side.t focus]}
     bind $t <ButtonRelease-1> {qc::treeClick %x %y}
-    bind $t <Return>          {qc::treeActivate [.side.t focus]}
+    bind $t <Return> {qc::treeActivate [.side.t focus]}
 }
 
 proc qc::treeFill {item} {
     set t .side.t
-    if {$item eq "" || ![$t exists $item]} return
+    if {$item eq "" || ![$t exists $item]} {return}
     set kids [$t children $item]
     if {[llength $kids] == 1 && [string index [lindex $kids 0] 0] eq "\x01"} {
         fillDir $item $item
@@ -895,7 +911,7 @@ proc qc::fillDir {parent dir} {
     set dirs {}
     set files {}
     foreach p [glob -nocomplain -directory $dir *] {
-        if {[file isdirectory $p]} { lappend dirs $p } else { lappend files $p }
+        if {[file isdirectory $p]} {lappend dirs $p} else {lappend files $p}
     }
     foreach p [lsort -dictionary $dirs] {
         $t insert $parent end -id $p -text [file tail $p] -tags dir
@@ -909,21 +925,21 @@ proc qc::fillDir {parent dir} {
 proc qc::treeClick {x y} {
     set t .side.t
     set item [$t identify item $x $y]
-    if {$item eq "" || [string match *indicator* [$t identify element $x $y]]} return
+    if {$item eq "" || [string match *indicator* [$t identify element $x $y]]} {return}
     treeActivate $item
 }
 
 # Arquivo: abre no editor. Pasta: abre/fecha o nó.
 proc qc::treeActivate {item} {
     set t .side.t
-    if {$item eq "" || ![$t exists $item]} return
+    if {$item eq "" || ![$t exists $item]} {return}
     if {[$t tag has dir $item]} {
         set open [expr {![$t item $item -open]}]
-        if {$open} { treeFill $item }
+        if {$open} {treeFill $item}
         $t item $item -open $open
         return
     }
-    if {$item ne $::qc::file} { openFile $item }
+    if {$item ne $::qc::file} {openFile $item}
     focus $::qc::ed
 }
 
@@ -932,11 +948,11 @@ proc qc::openFolder {{dir ""}} {
     if {$dir eq ""} {
         set opts [list -parent . -title "Abrir pasta" -mustexist 1]
         foreach d [list $cfg(folder) $cfg(lastdir)] {
-            if {$d ne "" && [file isdirectory $d]} { lappend opts -initialdir $d; break }
+            if {$d ne "" && [file isdirectory $d]} {lappend opts -initialdir $d; break}
         }
         set dir [tk_chooseDirectory {*}$opts]
         if {$dir eq ""} {
-            if {$cfg(folder) eq ""} { set cfg(sidebar) 0 }
+            if {$cfg(folder) eq ""} {set cfg(sidebar) 0}
             return
         }
     }
@@ -946,7 +962,7 @@ proc qc::openFolder {{dir ""}} {
     fillDir {} $cfg(folder)
     showSide 1
     treeReveal
-    if {$cfg(autocomp)} { projIndexStart }
+    if {$cfg(autocomp)} {projIndexStart}
 }
 
 proc qc::closeFolder {} {
@@ -960,7 +976,7 @@ proc qc::closeFolder {} {
 # Relê a pasta, mantendo abertas as subpastas que estavam abertas.
 proc qc::refreshFolder {} {
     variable cfg
-    if {$cfg(folder) eq "" || ![file isdirectory $cfg(folder)]} return
+    if {$cfg(folder) eq "" || ![file isdirectory $cfg(folder)]} {return}
     set t .side.t
     set open {}
     set stack [$t children {}]
@@ -975,13 +991,13 @@ proc qc::refreshFolder {} {
     set top [$t identify item 5 5]
     fillDir {} $cfg(folder)
     foreach i $open {
-        if {[$t exists $i]} { fillDir $i $i; $t item $i -open 1 }
+        if {[$t exists $i]} {fillDir $i $i; $t item $i -open 1}
     }
     set keep {}
-    foreach i $sel { if {[$t exists $i]} { lappend keep $i } }
+    foreach i $sel {if {[$t exists $i]} {lappend keep $i}}
     $t selection set $keep
-    if {$top ne "" && [$t exists $top]} { $t see $top }
-    if {$cfg(autocomp) || $::qc::PS(root) ne ""} { projIndexStart }
+    if {$top ne "" && [$t exists $top]} {$t see $top}
+    if {$cfg(autocomp) || $::qc::PS(root) ne ""} {projIndexStart}
 }
 
 # Seleciona na árvore o arquivo aberto no editor (abrindo as pastas dele).
@@ -989,7 +1005,7 @@ proc qc::treeReveal {} {
     variable cfg
     variable file
     set t .side.t
-    if {$file eq "" || $cfg(folder) eq "" || ".side" ni [.hp panes]} return
+    if {$file eq "" || $cfg(folder) eq "" || ".side" ni [.hp panes]} {return}
     set root [file normalize $cfg(folder)]
     if {[string first $root/ $file] != 0} {
         $t selection set {}
@@ -998,7 +1014,7 @@ proc qc::treeReveal {} {
     set p $root
     foreach part [lrange [file split [string range $file [string length $root]+1 end]] 0 end-1] {
         set p [file join $p $part]
-        if {![$t exists $p]} return
+        if {![$t exists $p]} {return}
         treeFill $p
         $t item $p -open 1
     }
@@ -1017,6 +1033,7 @@ proc qc::showSide {on} {
         .hp insert 0 .side -weight 0
         update idletasks
         catch {.hp sashpos 0 $cfg(sidew)}
+        # tclint-disable-next-line command-args
         after idle [list catch [list .hp sashpos 0 $cfg(sidew)]]
     } elseif {!$on && $shown} {
         catch {set cfg(sidew) [.hp sashpos 0]}
@@ -1038,7 +1055,7 @@ proc qc::applySide {} {
     } elseif {$cfg(folder) eq "" || ![file isdirectory $cfg(folder)]} {
         openFolder
     } else {
-        if {![llength [.side.t children {}]]} { openFolder $cfg(folder) }
+        if {![llength [.side.t children {}]]} {openFolder $cfg(folder)}
         showSide 1
         treeReveal
     }
@@ -1060,14 +1077,14 @@ proc qc::projectFile {} {
     variable file
     variable cfg
     set starts {}
-    if {$file ne ""} { lappend starts [file dirname $file] }
-    if {$cfg(folder) ne ""} { lappend starts $cfg(folder) }
+    if {$file ne ""} {lappend starts [file dirname $file]}
+    if {$cfg(folder) ne ""} {lappend starts $cfg(folder)}
     foreach d $starts {
         while 1 {
             set f [file join $d $::qc::projName]
-            if {[file isfile $f]} { return $f }
+            if {[file isfile $f]} {return $f}
             set up [file dirname $d]
-            if {$up eq $d} break
+            if {$up eq $d} {break}
             set d $up
         }
     }
@@ -1078,7 +1095,7 @@ proc qc::projectFile {} {
 proc qc::projectCmds {pf} {
     set lines {}
     foreach l [split [readFile $pf] \n] {
-        if {![regexp {^\s*#} $l]} { lappend lines $l }
+        if {![regexp {^\s*#} $l]} {lappend lines $l}
     }
     set d [join $lines \n]
     if {[catch {dict size $d}]} {
@@ -1126,12 +1143,13 @@ proc qc::runProject {pf name} {
     # o build lê do disco: salva antes os arquivos abertos modificados
     foreach w $::qc::tabs {
         set f $::qc::TB($w,file)
-        if {$f ne "" && [$w edit modified] && ![saveTo $f $w]} return
+        if {$f ne "" && [$w edit modified] && ![saveTo $f $w]} {return}
     }
     set root [file dirname [file normalize $pf]]
     set cmd [string map [list %F [shQuote $file] %R [shQuote $root]] [dict get $cmds $name]]
-    if {$cfg(autoclear)} { clearConsole }
+    if {$cfg(autoclear)} {clearConsole}
     ::qc::_edw tag remove errline 1.0 end
+    ::qc::_edw tag remove warnline 1.0 end
     if {$::tcl_platform(platform) eq "windows"} {
         set argv [list cmd /c $cmd]
     } else {
@@ -1155,10 +1173,10 @@ proc qc::runProject {pf name} {
     }
     array set R [list fd $fd er $er open 2 t0 [clock milliseconds] lang $::qc::lang \
         killed 0 jumped 0 pend "" sgr {} pid [lindex [pid $fd] 0] proj $root]
-    fileevent $fd readable [list qc::onStdout $fd]
-    fileevent $er readable [list qc::onStderr $er]
+    chan event $fd readable [list qc::onStdout $fd]
+    chan event $er readable [list qc::onStderr $er]
     conAppend "▶ [join [list "$name: [dict get $cmds $name]" [file tail $root] \
-        [clock format [clock seconds] -format %H:%M:%S]] {  ·  }]\n" info
+    [clock format [clock seconds] -format %H:%M:%S]] {  ·  }]\n" info
     set R(scan) [$::qc::con index end-1c]
     setRunning 1
     set ::qc::status "Executando $name…"
@@ -1178,8 +1196,8 @@ proc qc::projScan {} {
         set l [lindex [split $i .] 0]
         foreach {m f n c} [regexp -all -inline -indices -- $re $line] {
             set path [string range $line {*}$f]
-            if {[file pathtype $path] ne "absolute"} { set path [file join $R(proj) $path] }
-            if {![file isfile $path]} continue
+            if {[file pathtype $path] ne "absolute"} {set path [file join $R(proj) $path]}
+            if {![file isfile $path]} {continue}
             set path [file normalize $path]
             set ln [string range $line {*}$n]
             set col [expr {[lindex $c 0] >= 0 ? [string range $line {*}$c] - 1 : 0}]
@@ -1196,7 +1214,7 @@ proc qc::projScan {} {
 proc qc::openAt {path line col} {
     if {$path ne $::qc::file} {
         openFile $path
-        if {$::qc::file ne $path} return
+        if {$::qc::file ne $path} {return}
     }
     gotoLine $line $col
 }
@@ -1234,7 +1252,7 @@ proc qc::editProjectFile {} {
             set root [file dirname $file]
         } else {
             set root [tk_chooseDirectory -parent . -title "Pasta do projeto" -mustexist 1]
-            if {$root eq ""} return
+            if {$root eq ""} {return}
         }
         set pf [file join $root $::qc::projName]
         if {[file exists [file join $root build.sbt]]} {
@@ -1251,7 +1269,7 @@ proc qc::editProjectFile {} {
 # %R = esta pasta. Referências arquivo:linha:coluna na saída viram links.
 $cmds
 "
-        if {$cfg(folder) ne ""} { refreshFolder }
+        if {$cfg(folder) ne ""} {refreshFolder}
     }
     openFile $pf
 }
@@ -1265,12 +1283,12 @@ proc qc::setLang {id} {
     variable langs
     variable inited
     variable cfg
-    if {$id ni $langs} return
+    if {$id ni $langs} {return}
     if {$id ni $inited} {
         lappend inited $id
         set h [hook init $id]
         if {$h ne ""} {
-            if {[catch {$h} err]} { conAppend "Erro no init de $id: $err\n" stderr }
+            if {[catch {$h} err]} {conAppend "Erro no init de $id: $err\n" stderr}
         }
     }
     set lang $id
@@ -1281,11 +1299,12 @@ proc qc::setLang {id} {
     compileLang
     updateTabs
     updateTemplateMenu
+    updateFmtSaveMenu
     highlight
     updateTitle
     detectVersion
     # índice de biblioteca da linguagem (dica/F12), em segundo plano
-    if {$cfg(hoverdef)} { apiStart $id }
+    if {$cfg(hoverdef)} {apiStart $id}
 }
 
 # Monta a regex única da linguagem: cada token vira um grupo; um token com
@@ -1297,7 +1316,7 @@ proc qc::compileLang {} {
     variable TB
     set d [ldict]
     if {[info exists TB($ed,hltags)]} {
-        foreach t $TB($ed,hltags) { catch {::qc::_edw tag delete $t} }
+        foreach t $TB($ed,hltags) {catch {::qc::_edw tag delete $t}}
     }
     array unset H
     set parts {}
@@ -1313,14 +1332,14 @@ proc qc::compileLang {} {
         lappend parts "($re)"
         lappend specs [list $tag $g [expr {$n > 0}]]
         incr g [expr {$n + 1}]
-        if {$tag ne "word"} { lappend tags $tag }
+        if {$tag ne "word"} {lappend tags $tag}
     }
     set H(re) "(?w)[join $parts |]"
     set H(specs) $specs
     set H(nfields) $g
     set wd [dict create]
     dict for {tag list} [dict get $d words] {
-        foreach w $list { dict set wd $w $tag }
+        foreach w $list {dict set wd $w $tag}
         lappend tags $tag
     }
     set H(words) $wd
@@ -1335,10 +1354,10 @@ proc qc::compileLang {} {
     set H(rainbow) [expr {[dict get $d rainbow] ? [llength $::qc::rainbow] : 0}]
     set subtags {}
     dict for {t rules} $H(sub) {
-        foreach {cond st sre} $rules { lappend subtags $st }
+        foreach {cond st sre} $rules {lappend subtags $st}
     }
     lappend tags $H(defTag) number
-    if {$H(capType) ne ""} { lappend tags $H(capType) }
+    if {$H(capType) ne ""} {lappend tags $H(capType)}
     set rbStyles {}
     for {set k 0} {$k < $H(rainbow)} {incr k} {
         lappend tags rb$k
@@ -1358,22 +1377,22 @@ proc qc::compileLang {} {
         set opts {}
         if {[dict exists $styles $t]} {
             lassign [dict get $styles $t] color st
-            if {$color ne ""} { lappend opts -foreground $color }
+            if {$color ne ""} {lappend opts -foreground $color}
             switch -- $st {
-                B { lappend opts -font QcMonoB }
-                I { lappend opts -font QcMonoI }
+                B {lappend opts -font QcMonoB}
+                I {lappend opts -font QcMonoI}
             }
         }
         ::qc::_edw tag configure $t {*}$opts
     }
-    foreach t [concat $H(subtags) errline found bmatch bbad sel] { ::qc::_edw tag raise $t }
+    foreach t [concat $H(subtags) warnline errline found bmatch bbad sel] {::qc::_edw tag raise $t}
     ::qc::_edw tag lower curline
 }
 
 proc qc::schedHighlight {} {
     variable hlAfter
     after cancel $hlAfter
-    set hlAfter [after 120 qc::highlight]
+    set hlAfter [after 120 {qc::highlight}]
 }
 
 proc qc::highlight {} {
@@ -1386,28 +1405,28 @@ proc qc::highlight {} {
         lappend starts $o
         incr o [expr {[string length $ln] + 1}]
     }
-    foreach t $H(tags) { set rng($t) {} }
+    foreach t $H(tags) {set rng($t) {}}
     set nf $H(nfields)
     set defNext 0
-    set open {}                    ;# rainbow: aberturas pendentes {fecho range}
+    set open {} ;# rainbow: aberturas pendentes {fecho range}
     set pretty [expr {$::qc::cfg(pretty) && [dict size $H(pretty)]}]
-    set pw {}                      ;# palavras exibidas como símbolo
-    set pe {}                      ;# ...e o trecho oculto de cada uma
+    set pw {} ;# palavras exibidas como símbolo
+    set pe {} ;# ...e o trecho oculto de cada uma
     set m [regexp -all -inline -indices -- $H(re) $txt]
     for {set i 0} {$i < [llength $m]} {incr i $nf} {
         set tag ""
         foreach spec $H(specs) {
             lassign $spec t g inner
             set r [lindex $m [expr {$i + $g}]]
-            if {[lindex $r 0] < 0} continue
+            if {[lindex $r 0] < 0} {continue}
             set tag $t
             if {$inner} {
                 set r2 [lindex $m [expr {$i + $g + 1}]]
-                if {[lindex $r2 0] >= 0} { set r $r2 }
+                if {[lindex $r2 0] >= 0} {set r $r2}
             }
             break
         }
-        if {$tag eq ""} continue
+        if {$tag eq ""} {continue}
         lassign $r a z
         if {$tag eq "word"} {
             set word [string range $txt $a $z]
@@ -1423,7 +1442,7 @@ proc qc::highlight {} {
                 set tag [dict get $H(words) $word]
                 set fromTable 1
             }
-            if {$H(wordHook) ne ""} { set tag [$H(wordHook) $word $tag $txt $a] }
+            if {$H(wordHook) ne ""} {set tag [$H(wordHook) $word $tag $txt $a]}
             if {$tag ne ""} {
                 set defNext [expr {$fromTable && $word in $H(defWords)}]
             } elseif {$defNext} {
@@ -1461,19 +1480,19 @@ proc qc::highlight {} {
         if {[dict exists $H(sub) $tag]} {
             set str [string range $txt $a $z]
             foreach {cond st sre} [dict get $H(sub) $tag] {
-                if {![regexp -- $cond $str]} continue
+                if {![regexp -- $cond $str]} {continue}
                 foreach sr [regexp -all -inline -indices -- $sre $str] {
                     lassign $sr ia iz
                     lappend rng($st) [off2idx $starts [expr {$a + $ia}]] \
-                                     [off2idx $starts [expr {$a + $iz + 1}]]
+                        [off2idx $starts [expr {$a + $iz + 1}]]
                 }
             }
         }
     }
-    foreach o $open { lappend rng(rbbad) {*}[lindex $o 1] }
+    foreach o $open {lappend rng(rbbad) {*}[lindex $o 1]}
     foreach t $H(tags) {
         ::qc::_edw tag remove $t 1.0 end
-        if {[llength $rng($t)]} { ::qc::_edw tag add $t {*}$rng($t) }
+        if {[llength $rng($t)]} {::qc::_edw tag add $t {*}$rng($t)}
     }
     ::qc::_edw tag remove pword 1.0 end
     ::qc::_edw tag remove pel 1.0 end
@@ -1484,7 +1503,7 @@ proc qc::highlight {} {
     unset -nocomplain ::qc::TB($ed,praw)
     prettyCursor
     schedGutter
-    if {[winfo ismapped .pw.ed.find]} { markAll }
+    if {[winfo ismapped .pw.ed.find]} {markAll}
 }
 
 # offset de caractere -> índice do widget text
@@ -1498,17 +1517,17 @@ proc qc::off2idx {starts off} {
 # ---------------------------------------------------------------------------
 
 proc qc::edYscroll {w args} {
-    if {$w ne $::qc::ed} return
+    if {$w ne $::qc::ed} {return}
     .pw.ed.sy set {*}$args
     schedGutter
-    if {[llength $::qc::mcur]} { after idle qc::drawCarets }
+    if {[llength $::qc::mcur]} {after idle {qc::drawCarets}}
 }
 
 proc qc::edXscroll {w args} {
-    if {$w ne $::qc::ed} return
+    if {$w ne $::qc::ed} {return}
     .pw.ed.sx set {*}$args
     schedGutter
-    if {[llength $::qc::mcur]} { after idle qc::drawCarets }
+    if {[llength $::qc::mcur]} {after idle {qc::drawCarets}}
 }
 
 # barras de rolagem -> editor da aba ativa
@@ -1520,7 +1539,7 @@ proc qc::schedGutter {} {
     variable gutPending
     if {!$gutPending} {
         set gutPending 1
-        after idle qc::drawGutter
+        after idle {qc::drawGutter}
     }
 }
 
@@ -1533,13 +1552,13 @@ proc qc::drawGutter {} {
     set last [lindex [split [$ed index end-1c] .] 0]
     set digits [expr {max(3, [string length $last])}]
     set w [expr {[font measure QcMono [string repeat 9 $digits]] + 18}]
-    if {[$gut cget -width] != $w} { $gut configure -width $w }
+    if {[$gut cget -width] != $w} {$gut configure -width $w}
     set cur [lindex [split [$ed index insert] .] 0]
     set i [$ed index "@0,0 linestart"]
-    if {[$ed dlineinfo $i] eq ""} { set i [$ed index "$i +1 line"] }
+    if {[$ed dlineinfo $i] eq ""} {set i [$ed index "$i +1 line"]}
     while {[$ed compare $i < end]} {
         set d [$ed dlineinfo $i]
-        if {$d eq ""} break
+        if {$d eq ""} {break}
         set n [lindex [split $i .] 0]
         $gut create text [expr {$w - 10}] [lindex $d 1] -anchor ne -text $n \
             -font QcMono -fill [expr {$n == $cur ? $C(gutcur) : $C(gutfg)}]
@@ -1559,6 +1578,7 @@ proc qc::gutterClick {y} {
 
 proc qc::onChange {} {
     ::qc::_edw tag remove errline 1.0 end
+    ::qc::_edw tag remove warnline 1.0 end
     schedHighlight
     schedGutter
     onCursor
@@ -1568,7 +1588,7 @@ proc qc::onCursor {} {
     variable curPending
     if {!$curPending} {
         set curPending 1
-        after idle qc::updateCursor
+        after idle {qc::updateCursor}
     }
 }
 
@@ -1618,10 +1638,10 @@ proc qc::drawPretty {} {
         while {[set r [::qc::_edw tag nextrange pword $p $bot]] ne ""} {
             lassign $r s e
             set p $e
-            if {"pel" ni [::qc::_edw tag names "$s +1c"]} continue
+            if {"pel" ni [::qc::_edw tag names "$s +1c"]} {continue}
             set word [::qc::_edw get $s $e]
             set bb [::qc::_edw bbox $s]
-            if {$bb eq "" || ![dict exists $H(pretty) $word]} continue
+            if {$bb eq "" || ![dict exists $H(pretty) $word]} {continue}
             lassign $bb x y w h
             # cores e fonte das tags do caractere (em ordem de prioridade)
             set fg $C(edfg)
@@ -1633,11 +1653,11 @@ proc qc::drawPretty {} {
                     continue
                 }
                 set v [::qc::_edw tag cget $t -foreground]
-                if {$v ne ""} { set fg $v }
+                if {$v ne ""} {set fg $v}
                 set v [::qc::_edw tag cget $t -background]
-                if {$v ne ""} { set bg $v }
+                if {$v ne ""} {set bg $v}
                 set v [::qc::_edw tag cget $t -font]
-                if {$v ne ""} { set font $v }
+                if {$v ne ""} {set font $v}
             }
             set l $ed.pl$i
             if {![winfo exists $l]} {
@@ -1660,7 +1680,7 @@ proc qc::drawPretty {} {
 # Clique no símbolo: cursor no começo da palavra (que então aparece).
 proc qc::prettyClick {l} {
     set ed [winfo parent $l]
-    if {![info exists ::qc::plIdx($l)]} return
+    if {![info exists ::qc::plIdx($l)]} {return}
     $ed mark set insert $::qc::plIdx($l)
     $ed tag remove sel 1.0 end
     focus $ed
@@ -1686,7 +1706,7 @@ foreach ev {Button-4 Button-5 Shift-Button-4 Shift-Button-5} {
 # Verdadeiro se a posição está dentro de string/comentário (pelo destaque).
 proc qc::inLiteral {idx} {
     foreach t [::qc::_edw tag names $idx] {
-        if {$t in {string comment directive}} { return 1 }
+        if {$t in {string comment directive}} {return 1}
     }
     return 0
 }
@@ -1704,7 +1724,7 @@ proc qc::matchBrackets {} {
             break
         }
     }
-    if {$i eq "" || [inLiteral $i]} return
+    if {$i eq "" || [inLiteral $i]} {return}
     set k [lsearch -exact $pairs $ch]
     if {$k % 2 == 0} {
         set open $ch; set close [lindex $pairs $k+1]; set fwd 1
@@ -1720,9 +1740,9 @@ proc qc::matchBrackets {} {
         } else {
             set pos [::qc::_edw search -backwards -regexp -- $re $pos 1.0]
         }
-        if {$pos eq ""} break
-        if {[inLiteral $pos]} continue
-        if {[$ed get $pos] eq $ch} { incr depth } else { incr depth -1 }
+        if {$pos eq ""} {break}
+        if {[inLiteral $pos]} {continue}
+        if {[$ed get $pos] eq $ch} {incr depth} else {incr depth -1}
         if {$depth == 0} {
             ::qc::_edw tag add bmatch $i "$i +1c" $pos "$pos +1c"
             return
@@ -1737,8 +1757,8 @@ proc qc::enclosingOpen {idx} {
     set pos [::qc::_edw index $idx]
     for {set n 0} {$n < 20000} {incr n} {
         set pos [::qc::_edw search -backwards -regexp -- {[][(){}]} $pos 1.0]
-        if {$pos eq ""} break
-        if {[inLiteral $pos]} continue
+        if {$pos eq ""} {break}
+        if {[inLiteral $pos]} {continue}
         if {[::qc::_edw get $pos] in {) \] \}}} {
             incr depth
         } elseif {$depth == 0} {
@@ -1791,7 +1811,7 @@ proc qc::selectAll {w} {
 }
 
 proc qc::paste {w} {
-    if {[catch {clipboard get} data]} return
+    if {[catch {clipboard get} data]} {return}
     if {$w eq $::qc::ed && [llength $::qc::mcur] && !$::qc::mapplying} {
         multiApply [list qc::paste $w]
         return
@@ -1809,7 +1829,7 @@ proc qc::selLines {} {
         set a [lindex [split [$ed index sel.first] .] 0]
         set z [$ed index sel.last]
         lassign [split $z .] zl zc
-        if {$zc == 0 && $zl > $a} { incr zl -1 }
+        if {$zc == 0 && $zl > $a} {incr zl -1}
         return [list $a $zl]
     }
     set l [lindex [split [$ed index insert] .] 0]
@@ -1863,9 +1883,9 @@ proc qc::newline {} {
     set before [$ed get "insert linestart" insert]
     regexp {^[ \t]*} $before ws
     set code $before
-    if {[lget commentRe] ne ""} { set code [regsub -- [lget commentRe] $code ""] }
+    if {[lget commentRe] ne ""} {set code [regsub -- [lget commentRe] $code ""]}
     set extra ""
-    if {[regexp -- [lget indentAfter] $code]} { set extra [indentStr] }
+    if {[regexp -- [lget indentAfter] $code]} {set extra [indentStr]}
     set open [string index [string trimright $code] end]
     set next [$ed get insert]
     if {$extra ne "" && "$open$next" in {\{\} () \[\]}} {
@@ -1890,7 +1910,7 @@ proc qc::closeChar {ch} {
             set n 1
         } else {
             set n [expr {[string length $before] % $iw}]
-            if {$n == 0} { set n $iw }
+            if {$n == 0} {set n $iw}
         }
         $ed delete "insert -${n}c" insert
     }
@@ -1904,6 +1924,40 @@ proc qc::duplicateLine {} {
     set chunk [$ed get $a.0 "$z.0 lineend"]
     $ed insert "$z.0 lineend" "\n$chunk"
     $ed mark set insert "insert +[expr {$z - $a + 1}] lines"
+    $ed see insert
+}
+
+# Ctrl+Shift+↑/↓: move a linha atual (ou as da seleção) uma linha para
+# cima/baixo, mantendo cursor e seleção; um único passo de desfazer.
+proc qc::moveLines {d} {
+    variable ed
+    lassign [selLines] a z
+    set last [lindex [split [$ed index end-1c] .] 0]
+    if {($d < 0 && $a <= 1) || ($d > 0 && $z >= $last)} return
+    set sel [$ed tag ranges sel]
+    set ins [$ed index insert]
+    atomic {
+        if {$d < 0} {
+            set o [expr {$a - 1}]
+            set other [$ed get $o.0 "$o.0 lineend"]
+            $ed delete $o.0 $a.0
+            $ed insert "[expr {$z - 1}].0 lineend" "\n$other"
+        } else {
+            set o [expr {$z + 1}]
+            set other [$ed get $o.0 "$o.0 lineend"]
+            $ed delete "$z.0 lineend" "$o.0 lineend"
+            $ed insert $a.0 "$other\n"
+        }
+    }
+    set shift {{i d} {
+        lassign [split $i .] l c
+        return [expr {$l + $d}].$c
+    }}
+    $ed tag remove sel 1.0 end
+    if {[llength $sel] == 2} {
+        $ed tag add sel [apply $shift [lindex $sel 0] $d] [apply $shift [lindex $sel 1] $d]
+    }
+    $ed mark set insert [apply $shift $ins $d]
     $ed see insert
 }
 
@@ -1923,9 +1977,9 @@ proc qc::pairLists {} {
 
 # <KeyPress> do editor: trata os caracteres de pares; 1 = tratado.
 proc qc::keyChar {ch state} {
-    if {$state & 0x0C || [string length $ch] != 1} { return 0 }   ;# Ctrl / Alt
+    if {$state & 0x0C || [string length $ch] != 1} {return 0} ;# Ctrl / Alt
     lassign [pairLists] o c
-    if {$ch ni $o && $ch ni $c && $ch ni {) ] \}}} { return 0 }
+    if {$ch ni $o && $ch ni $c && $ch ni {) ] \}}} {return 0}
     typeChar $ch
     return 1
 }
@@ -1961,8 +2015,10 @@ proc qc::typeChar {ch} {
             $ed mark set insert "insert +1c"
             return
         }
-        set ok [expr {$next eq "" || [string is space $next] || $next in $closes
-                      || $next in {, ; : .}}]
+        set ok [expr {
+            $next eq "" || [string is space $next] || $next in $closes
+            || $next in {, ; : .}
+        }]
         if {$ok && $ch eq $cl} {
             # aspas: não depois de letra/dígito (ex.: don't) nem de "\"
             set ok [expr {![regexp {[\w\\]} $prev] && $prev ne $ch}]
@@ -2025,15 +2081,15 @@ proc qc::deleteFwd {} {
 # refeito ao abrir/recarregar a pasta e ao salvar.
 
 namespace eval qc {
-    variable AC               ;# popup: on, start (índice do início da palavra)...
+    variable AC ;# popup: on, start (índice do início da palavra)...
     array set AC {on 0 start "" items {} after "" buf {} kw {} proj {}}
-    variable PX               ;# PX(<arquivo>) = {mtime ext palavras}
+    variable PX ;# PX(<arquivo>) = {mtime ext palavras}
     array set PX {}
-    variable PW               ;# PW(<ext>,<palavra>) = nº de arquivos com ela
+    variable PW ;# PW(<ext>,<palavra>) = nº de arquivos com ela
     array set PW {}
-    variable PL               ;# PL(<ext>) = palavras de PW com essa extensão (cache)
+    variable PL ;# PL(<ext>) = palavras de PW com essa extensão (cache)
     array set PL {}
-    variable PS               ;# varredura em andamento
+    variable PS ;# varredura em andamento
     array set PS {root "" after "" dirs {} files {} seen {} n 0 done 0}
     variable acSkipDirs {node_modules target build dist out _build __pycache__ venv
         project/target}
@@ -2043,21 +2099,23 @@ namespace eval qc {
 
 proc qc::acWordRe {} {
     set tk [lget tokens]
-    if {[dict exists $tk word]} { return [dict get $tk word] }
+    if {[dict exists $tk word]} {return [dict get $tk word]}
     return {[A-Za-z_][A-Za-z0-9_]*}
 }
 
 # Palavras distintas de um texto (3+ caracteres, com alguma letra, sem
 # começar por dígito).
 proc qc::acExtract {text {re ""}} {
-    if {$re eq ""} { set re [acWordRe] }
+    if {$re eq ""} {set re [acWordRe]}
     set n [expr {[lindex [regexp -about $re] 0] + 1}]
     set all [regexp -all -inline -- $re $text]
     set out {}
     for {set i 0} {$i < [llength $all]} {incr i $n} {
         set w [lindex $all $i]
-        if {[string length $w] >= 3 && ![string is digit [string index $w 0]]
-            && [regexp {[[:alpha:]]} $w]} {
+        if {
+            [string length $w] >= 3 && ![string is digit [string index $w 0]]
+            && [regexp {[[:alpha:]]} $w]
+        } {
             lappend out $w
         }
     }
@@ -2067,7 +2125,7 @@ proc qc::acExtract {text {re ""}} {
 # Parte da palavra antes do cursor ("" se o cursor não está numa palavra).
 proc qc::acPrefix {} {
     set before [$::qc::ed get "insert linestart" insert]
-    if {[regexp -- "(?:[acWordRe])\$" $before m]} { return $m }
+    if {[regexp -- "(?:[acWordRe])\$" $before m]} {return $m}
     return ""
 }
 
@@ -2090,8 +2148,8 @@ proc qc::acPool {} {
     set AC(kw) [lsort [dict keys $H(words)]]
     set AC(proj) {}
     if {$cfg(folder) ne ""} {
-        if {$PS(root) ne $cfg(folder)} { projIndexStart }
-        foreach ext [lget ext] { lappend AC(proj) {*}[projWords $ext] }
+        if {$PS(root) ne $cfg(folder)} {projIndexStart}
+        foreach ext [lget ext] {lappend AC(proj) {*}[projWords $ext]}
     }
 }
 
@@ -2109,10 +2167,10 @@ proc qc::acFilter {} {
     set rest {}
     foreach src {buf kw proj} {
         foreach w [lsearch -all -inline -glob -nocase $AC($src) $g] {
-            if {$w eq $p || [info exists seen($w)]} continue
+            if {$w eq $p || [info exists seen($w)]} {continue}
             set seen($w) 1
-            if {[string match $g $w]} { lappend exact $w } else { lappend rest $w }
-            if {[array size seen] >= 300} break
+            if {[string match $g $w]} {lappend exact $w} else {lappend rest $w}
+            if {[array size seen] >= 300} {break}
         }
     }
     set items [concat $exact $rest]
@@ -2146,14 +2204,14 @@ proc qc::acPlace {} {
     variable AC
     variable ed
     set bb [$ed bbox $AC(start)]
-    if {$bb eq ""} { set bb [$ed bbox insert] }
-    if {$bb eq ""} { acHide; return }
-    if {![winfo exists .ac]} { acBuild }
+    if {$bb eq ""} {set bb [$ed bbox insert]}
+    if {$bb eq ""} {acHide; return}
+    if {![winfo exists .ac]} {acBuild}
     set l .ac.l
     $l delete 0 end
     $l insert end {*}$AC(items)
     set wid 12
-    foreach i $AC(items) { if {[string length $i] > $wid} { set wid [string length $i] } }
+    foreach i $AC(items) {if {[string length $i] > $wid} {set wid [string length $i]}}
     $l configure -height [expr {min([llength $AC(items)], 10)}] -width [expr {min($wid + 1, 60)}]
     $l selection clear 0 end
     $l selection set 0
@@ -2165,8 +2223,8 @@ proc qc::acPlace {} {
     update idletasks
     set ph [winfo reqheight .ac]
     set pw [winfo reqwidth .ac]
-    if {$ry + $ph > [winfo vrootheight .] } { set ry [expr {$ry - $h - $ph - 4}] }
-    if {$rx + $pw > [winfo vrootwidth .]} { set rx [expr {[winfo vrootwidth .] - $pw}] }
+    if {$ry + $ph > [winfo vrootheight .]} {set ry [expr {$ry - $h - $ph - 4}]}
+    if {$rx + $pw > [winfo vrootwidth .]} {set rx [expr {[winfo vrootwidth .] - $pw}]}
     wm geometry .ac +$rx+$ry
     if {!$AC(on)} {
         wm deiconify .ac
@@ -2178,12 +2236,12 @@ proc qc::acPlace {} {
 proc qc::acShow {manual} {
     variable AC
     variable ed
-    if {[llength $::qc::mcur]} return
+    if {[llength $::qc::mcur]} {return}
     set p [acPrefix]
-    if {$p eq "" && !$manual} return
+    if {$p eq "" && !$manual} {return}
     set AC(start) [$ed index "insert -[string length $p]c"]
     acPool
-    if {![acFilter] && $manual} { set ::qc::status "Nenhuma sugestão" }
+    if {![acFilter] && $manual} {set ::qc::status "Nenhuma sugestão"}
 }
 
 proc qc::acHide {} {
@@ -2200,7 +2258,7 @@ proc qc::acMove {d} {
     set n [$l size]
     set i [expr {[$l curselection] + $d}]
     if {abs($d) == 1} {
-        set i [expr {($i + $n) % $n}]                  ;# setas dão a volta
+        set i [expr {($i + $n) % $n}] ;# setas dão a volta
     } else {
         set i [expr {max(0, min($n - 1, $i))}]
     }
@@ -2213,11 +2271,11 @@ proc qc::acMove {d} {
 proc qc::acAccept {{i ""}} {
     variable AC
     variable ed
-    if {$i eq ""} { set i [.ac.l curselection] }
+    if {$i eq ""} {set i [.ac.l curselection]}
     set w [lindex $AC(items) $i]
     acHide
     focus $ed
-    if {$w eq "" || [$ed compare insert < $AC(start)]} return
+    if {$w eq "" || [$ed compare insert < $AC(start)]} {return}
     atomic {
         $ed delete $AC(start) insert
         $ed insert insert $w
@@ -2230,38 +2288,39 @@ proc qc::acKey {K A s} {
     variable AC
     if {$AC(on) && !($s & 0x0C)} {
         switch -- $K {
-            Up       { acMove -1; return -code break }
-            Down     { acMove 1;  return -code break }
-            Prior    { acMove -9; return -code break }
-            Next     { acMove 9;  return -code break }
-            Return - KP_Enter - Tab { acAccept; return -code break }
-            Escape   { acHide; return -code break }
-            Left - Right - Home - End { acHide }
+            Up {acMove -1; return -code break}
+            Down {acMove 1; return -code break}
+            Prior {acMove -9; return -code break}
+            Next {acMove 9; return -code break}
+            Return - KP_Enter - Tab {acAccept; return -code break}
+            Escape {acHide; return -code break}
+            Left - Right - Home - End {acHide}
         }
     } elseif {$AC(on) && ![regexp {_[LR]$} $K]} {
-        acHide                                          ;# Ctrl/Alt + tecla
+        acHide ;# Ctrl/Alt + tecla
     }
     # depois que a tecla for processada pelo editor: abre/atualiza o popup
     after cancel $AC(after)
+    # tclint-disable-next-line command-args
     set AC(after) [after idle [list qc::acAfterKey $K $A $s]]
 }
 
 proc qc::acAfterKey {K A s} {
     variable AC
     variable cfg
-    if {[llength $::qc::mcur]} { acHide; return }
-    if {$s & 0x0C} return
+    if {[llength $::qc::mcur]} {acHide; return}
+    if {$s & 0x0C} {return}
     set typed [expr {$A ne "" && [string is print $A]}]
     if {$AC(on)} {
         if {$typed || $K in {BackSpace Delete}} {
-            if {[acPrefix] eq ""} { acHide } else { acFilter }
+            if {[acPrefix] eq ""} {acHide} else {acFilter}
         }
         return
     }
-    if {!$cfg(autocomp) || !$typed} return
+    if {!$cfg(autocomp) || !$typed} {return}
     set p [acPrefix]
-    if {[string length $p] < 3 || [string index $p end] ne $A} return
-    if {[inLiteral "insert -[string length $p]c"]} return
+    if {[string length $p] < 3 || [string index $p end] ne $A} {return}
+    if {[inLiteral "insert -[string length $p]c"]} {return}
     acShow 0
 }
 
@@ -2271,15 +2330,15 @@ proc qc::projIndexStart {} {
     variable PS
     variable cfg
     after cancel $PS(after)
-    if {$cfg(folder) eq "" || ![file isdirectory $cfg(folder)]} { projIndexClear; return }
-    if {$PS(root) ne $cfg(folder)} { projIndexClear }
+    if {$cfg(folder) eq "" || ![file isdirectory $cfg(folder)]} {projIndexClear; return}
+    if {$PS(root) ne $cfg(folder)} {projIndexClear}
     set PS(root) $cfg(folder)
     set PS(dirs) [list $cfg(folder)]
     set PS(files) {}
     set PS(seen) [dict create]
     set PS(n) 0
     set PS(done) 0
-    set PS(after) [after 50 qc::projIndexStep]
+    set PS(after) [after 50 {qc::projIndexStep}]
 }
 
 proc qc::projIndexClear {} {
@@ -2317,7 +2376,7 @@ proc qc::projIndexStep {} {
                 }
             }
             foreach p [glob -nocomplain -directory $d -types f *] {
-                if {$PS(n) >= $acMaxFiles} break
+                if {$PS(n) >= $acMaxFiles} {break}
                 if {[langForFileAny $p] ne ""} {
                     lappend PS(files) $p
                     incr PS(n)
@@ -2326,14 +2385,14 @@ proc qc::projIndexStep {} {
         } else {
             # fim: esquece os arquivos que sumiram
             foreach f [array names PX] {
-                if {![dict exists $PS(seen) $f]} { projForget $f }
+                if {![dict exists $PS(seen) $f]} {projForget $f}
             }
             set PS(seen) {}
             set PS(done) 1
             return
         }
     }
-    set PS(after) [after 5 qc::projIndexStep]
+    set PS(after) [after 5 {qc::projIndexStep}]
 }
 
 proc qc::projIndexFile {f} {
@@ -2345,9 +2404,9 @@ proc qc::projIndexFile {f} {
         projForget $f
         return
     }
-    if {[info exists PX($f)] && [lindex $PX($f) 0] == $mt} return
+    if {[info exists PX($f)] && [lindex $PX($f) 0] == $mt} {return}
     set id [langForFileAny $f]
-    if {$id eq "" || [catch {readFile $f} data]} { projForget $f; return }
+    if {$id eq "" || [catch {readFile $f} data]} {projForget $f; return}
     projForget $f
     set ext [string tolower [file extension $f]]
     set tk [lget tokens $id]
@@ -2355,7 +2414,7 @@ proc qc::projIndexFile {f} {
     set words [acExtract $data $re]
     set PX($f) [list $mt $ext $words]
     defIndexFile $f $id $data
-    foreach w $words { incr PW($ext,$w) }
+    foreach w $words {incr PW($ext,$w)}
     unset -nocomplain PL($ext)
 }
 
@@ -2363,10 +2422,10 @@ proc qc::projForget {f} {
     variable PX
     variable PW
     variable PL
-    if {![info exists PX($f)]} return
+    if {![info exists PX($f)]} {return}
     lassign $PX($f) - ext words
     foreach w $words {
-        if {[incr PW($ext,$w) -1] <= 0} { unset PW($ext,$w) }
+        if {[incr PW($ext,$w) -1] <= 0} {unset PW($ext,$w)}
     }
     unset PX($f)
     defForget $f
@@ -2396,19 +2455,19 @@ proc qc::projWords {ext} {
 namespace eval qc {
     variable DX
     variable DN
-    variable DR               ;# DR(<lang>) = regexes de definição compiladas
+    variable DR ;# DR(<lang>) = regexes de definição compiladas
     array set DX {}
     array set DN {}
     array set DR {}
-    variable navStack {}      ;# posições para o Alt+←
+    variable navStack {} ;# posições para o Alt+←
     variable tipAfter ""
     variable tipKey ""
-    variable linkKey ""       ;# palavra sublinhada com Ctrl: {palavra início}
+    variable linkKey "" ;# palavra sublinhada com Ctrl: {palavra início}
 }
 
 proc qc::defRegexes {id} {
     variable DR
-    if {[info exists DR($id)]} { return $DR($id) }
+    if {[info exists DR($id)]} {return $DR($id)}
     set tk [lget tokens $id]
     set wre [expr {[dict exists $tk word] ? [dict get $tk word] : {[A-Za-z_][A-Za-z0-9_]*}}]
     set res {}
@@ -2421,14 +2480,14 @@ proc qc::defRegexes {id} {
     lappend res {*}[lget defPatterns $id]
     set out {}
     foreach re $res {
-        if {[catch {regexp -about $re} ab] || [lindex $ab 0] < 1} continue
+        if {[catch {regexp -about $re} ab] || [lindex $ab 0] < 1} {continue}
         lappend out $re [expr {[lindex $ab 0] + 1}]
     }
     # palavras-chave não são nomes de definição (builtins podem ser)
     set kw {}
     set wd [lget words $id]
     if {[dict exists $wd keyword]} {
-        foreach w [dict get $wd keyword] { dict set kw $w 1 }
+        foreach w [dict get $wd keyword] {dict set kw $w 1}
     }
     set p [regsub {(.)\1+$} [lget comment $id] {\1}]
     set DR($id) [list $out $kw $p [lget commentEnd $id]]
@@ -2445,7 +2504,7 @@ proc qc::defKey {name} {
 # linguagem dá o nome completo; "" descarta a definição (ex.: interna).
 proc qc::defsIn {text id {qual 0}} {
     lassign [defRegexes $id] res kw cpre cend
-    if {![llength $res]} { return {} }
+    if {![llength $res]} {return {}}
     set qh [expr {$qual ? [hook defQual $id] : ""}]
     set dstr [lget docString $id]
     set lines [split $text \n]
@@ -2461,17 +2520,17 @@ proc qc::defsIn {text id {qual 0}} {
         set m [regexp -all -inline -indices -line -- $re $text]
         for {set i 0} {$i < [llength $m]} {incr i $step} {
             lassign [lindex $m $i+1] a z
-            if {$a < 0} continue
+            if {$a < 0} {continue}
             set raw [string range $text $a $z]
             set key [defKey $raw]
-            if {$key eq "" || [dict exists $kw $key] || [dict exists $seen $a]} continue
+            if {$key eq "" || [dict exists $kw $key] || [dict exists $seen $a]} {continue}
             dict set seen $a 1
             set L [lsearch -bisect -integer $starts $a]
             set col [expr {$a - [lindex $starts $L]}]
             set q ""
             if {$qual} {
                 set q [expr {$qh ne "" ? [$qh $lines $L $raw] : $key}]
-                if {$q eq ""} continue
+                if {$q eq ""} {continue}
             }
             lassign [defSig $lines $L $col] sig E
             set post [expr {$dstr ? [defDocString $lines $E] : {}}]
@@ -2486,7 +2545,7 @@ proc qc::defsIn {text id {qual 0}} {
 # nome continuarem abertos, as seguintes (até 8). Devolve {texto últimaLinha}.
 proc qc::defSig {lines L col} {
     set line [lindex $lines $L]
-    if {$col > 0 && [string index $line $col-1] eq "("} { incr col -1 }
+    if {$col > 0 && [string index $line $col-1] eq "("} {incr col -1}
     set rest [string range $line $col end]
     set depth [expr {[regexp -all {\(} $rest] - [regexp -all {\)} $rest]}]
     set sig [list [string trim $line]]
@@ -2494,18 +2553,18 @@ proc qc::defSig {lines L col} {
     while {$depth > 0 && $E + 1 < [llength $lines]} {
         incr E
         set ln [lindex $lines $E]
-        if {$E < $L + 8} { lappend sig "  [string trim $ln]" }
+        if {$E < $L + 8} {lappend sig "  [string trim $ln]"}
         incr depth [expr {[regexp -all {\(} $ln] - [regexp -all {\)} $ln]}]
-        if {$E >= $L + 30} break
+        if {$E >= $L + 30} {break}
     }
-    if {$E >= $L + 8} { lappend sig "  …" }
+    if {$E >= $L + 8} {lappend sig "  …"}
     return [list [join $sig \n] $E]
 }
 
 # Docstring (Scheme): string que começa na linha seguinte à assinatura.
 proc qc::defDocString {lines E} {
     set t [string trim [lindex $lines [incr E]]]
-    if {[string index $t 0] ne "\""} { return {} }
+    if {[string index $t 0] ne "\""} {return {}}
     set out {}
     set t [string range $t 1 end]
     while {[llength $out] < 12} {
@@ -2514,7 +2573,7 @@ proc qc::defDocString {lines E} {
             break
         }
         lappend out [string trim $t]
-        if {[incr E] >= [llength $lines]} break
+        if {[incr E] >= [llength $lines]} {break}
         set t [lindex $lines $E]
     }
     return [lmap l $out {string map {\\" \" \\\\ \\} $l}]
@@ -2533,16 +2592,16 @@ proc qc::defDoc {lines L cpre cend} {
         set t [string trim [lindex $lines [incr k -1]]]
     }
     set ends [list */]
-    if {$cend ne ""} { lappend ends $cend }
+    if {$cend ne ""} {lappend ends $cend}
     set block 0
     foreach e $ends {
-        if {$t ne "" && [string match "*$e" $t]} { set block 1 }
+        if {$t ne "" && [string match "*$e" $t]} {set block 1}
     }
     while {$k >= 0 && [llength $doc] < 60} {
         set t [string trim [lindex $lines $k]]
         if {$block} {
             set doc [linsert $doc 0 $t]
-            if {[string match "/\\**" $t] || ($cend ne "" && [string first $cpre $t] == 0)} break
+            if {[string match "/\\**" $t] || ($cend ne "" && [string first $cpre $t] == 0)} {break}
         } elseif {$cpre ne "" && [string first $cpre $t] == 0} {
             set doc [linsert $doc 0 $t]
         } else {
@@ -2550,7 +2609,7 @@ proc qc::defDoc {lines L cpre cend} {
         }
         incr k -1
     }
-    if {$block || ![llength $doc]} { return [lrange $doc 0 9] }
+    if {$block || ![llength $doc]} {return [lrange $doc 0 9]}
     # parágrafos separados por linhas só com o prefixo; sem os de copyright
     # e licença
     set pr [regsub {(.)\1+$} $cpre {\1}]
@@ -2558,20 +2617,20 @@ proc qc::defDoc {lines L cpre cend} {
     set cur {}
     foreach t $doc {
         if {[string trim $t "$pr "] eq ""} {
-            if {[llength $cur]} { lappend paras $cur; set cur {} }
+            if {[llength $cur]} {lappend paras $cur; set cur {}}
         } else {
             lappend cur $t
         }
     }
-    if {[llength $cur]} { lappend paras $cur }
+    if {[llength $cur]} {lappend paras $cur}
     set out {}
     foreach p $paras {
-        if {[regexp -nocase {copyright|license|warrant|\$Id|RCS:} [join $p]]} continue
-        if {[llength $out]} { lappend out $pr }
+        if {[regexp -nocase {copyright|license|warrant|\$Id|RCS:} [join $p]]} {continue}
+        if {[llength $out]} {lappend out $pr}
         lappend out {*}$p
     }
     set out [lrange $out 0 9]
-    while {[llength $out] && [lindex $out end] eq $pr} { set out [lrange $out 0 end-1] }
+    while {[llength $out] && [lindex $out end] eq $pr} {set out [lrange $out 0 end-1]}
     return $out
 }
 
@@ -2580,20 +2639,20 @@ proc qc::defIndexFile {f id data} {
     variable DN
     defForget $f
     set defs [defsIn $data $id]
-    if {![llength $defs]} return
+    if {![llength $defs]} {return}
     set DX($f) $defs
-    foreach d $defs { dict set DN([lindex $d 0]) $f 1 }
+    foreach d $defs {dict set DN([lindex $d 0]) $f 1}
 }
 
 proc qc::defForget {f} {
     variable DX
     variable DN
-    if {![info exists DX($f)]} return
+    if {![info exists DX($f)]} {return}
     foreach d $DX($f) {
         set k [lindex $d 0]
         if {[info exists DN($k)]} {
             dict unset DN($k) $f
-            if {![dict size $DN($k)]} { unset DN($k) }
+            if {![dict size $DN($k)]} {unset DN($k)}
         }
     }
     unset DX($f)
@@ -2613,26 +2672,28 @@ proc qc::findDefs {name} {
     set out {}
     set open {}
     set ws [list $::qc::ed]
-    foreach w $::qc::tabs { if {$w ne $::qc::ed} { lappend ws $w } }
+    foreach w $::qc::tabs {if {$w ne $::qc::ed} {lappend ws $w}}
     foreach w $ws {
-        if {$TB($w,file) ne ""} { dict set open $TB($w,file) 1 }
-        if {$TB($w,lang) ne $id} continue
+        if {$TB($w,file) ne ""} {dict set open $TB($w,file) 1}
+        if {$TB($w,lang) ne $id} {continue}
         foreach d [defsIn [$w get 1.0 end-1c] $id] {
-            if {[lindex $d 0] eq $key} { lappend out [list $TB($w,file) $w {*}$d] }
+            if {[lindex $d 0] eq $key} {lappend out [list $TB($w,file) $w {*}$d]}
         }
     }
-    if {$cfg(folder) ne "" && $PS(root) ne $cfg(folder)} { projIndexStart }
+    if {$cfg(folder) ne "" && $PS(root) ne $cfg(folder)} {projIndexStart}
     if {[info exists DN($key)]} {
         set exts [lget ext]
         foreach f [lsort [dict keys $DN($key)]] {
-            if {[dict exists $open $f]
-                || [string tolower [file extension $f]] ni $exts} continue
+            if {
+                [dict exists $open $f]
+                || [string tolower [file extension $f]] ni $exts
+            } {continue}
             foreach d $DX($f) {
-                if {[lindex $d 0] eq $key} { lappend out [list $f "" {*}$d] }
+                if {[lindex $d 0] eq $key} {lappend out [list $f "" {*}$d]}
             }
         }
     }
-    if {![llength $out]} { set out [apiDefs $id $name] }
+    if {![llength $out]} {set out [apiDefs $id $name]}
     return $out
 }
 
@@ -2645,7 +2706,7 @@ proc qc::findDefs {name} {
 
 namespace eval qc {
     variable AX
-    variable AS               ;# AS(<lang>,todo|dirs|done): varredura
+    variable AS ;# AS(<lang>,todo|dirs|done): varredura
     array set AX {}
     array set AS {}
 }
@@ -2653,7 +2714,7 @@ namespace eval qc {
 proc qc::apiStart {id} {
     variable AS
     variable AX
-    if {[info exists AS($id,done)]} return
+    if {[info exists AS($id,done)]} {return}
     set AS($id,done) 0
     set AX($id) [dict create]
     set AS($id,todo) {}
@@ -2671,6 +2732,7 @@ proc qc::apiStart {id} {
             lappend AS($id,todo) $p
         }
     }
+    # tclint-disable-next-line command-args
     after 200 [list qc::apiStep $id]
 }
 
@@ -2689,8 +2751,10 @@ proc qc::apiStep {id} {
                 lappend AS($id,dirs) $p
             }
             foreach p [lsort [glob -nocomplain -directory $d -types f *]] {
-                if {[string tolower [file extension $p]] in $exts
-                    && ![catch {file size $p} sz] && $sz <= $acMaxSize} {
+                if {
+                    [string tolower [file extension $p]] in $exts
+                    && ![catch {file size $p} sz] && $sz <= $acMaxSize
+                } {
                     lappend AS($id,todo) $p
                     incr AS($id,n)
                 }
@@ -2700,6 +2764,7 @@ proc qc::apiStep {id} {
             return
         }
     }
+    # tclint-disable-next-line command-args
     after 5 [list qc::apiStep $id]
 }
 
@@ -2708,7 +2773,7 @@ proc qc::apiIndexFile {id f} {
     set data [readFile $f]
     set h [hook apiParse $id]
     set items -
-    if {$h ne ""} { set items [$h $f $data] }
+    if {$h ne ""} {set items [$h $f $data]}
     if {$items eq "-"} {
         set items {}
         foreach d [defsIn $data $id 1] {
@@ -2726,7 +2791,7 @@ proc qc::apiDefs {id name} {
     variable AX
     apiStart $id
     set q [regsub {^::} $name {}]
-    if {![info exists AX($id)] || ![dict exists $AX($id) $q]} { return {} }
+    if {![info exists AX($id)] || ![dict exists $AX($id) $q]} {return {}}
     return [dict get $AX($id) $q]
 }
 
@@ -2751,7 +2816,7 @@ proc qc::defsElsewhere {defs at} {
     set out {}
     foreach d $defs {
         lassign $d f w - dl dc
-        if {$w eq $::qc::ed && $dl == $l && $dc == $c} continue
+        if {$w eq $::qc::ed && $dl == $l && $dc == $c} {continue}
         lappend out $d
     }
     return $out
@@ -2759,13 +2824,13 @@ proc qc::defsElsewhere {defs at} {
 
 proc qc::defLabel {d} {
     lassign $d f w name line
-    if {$line == 0} { return "[file tail $f] (embutido, sem código-fonte)" }
+    if {$line == 0} {return "[file tail $f] (embutido, sem código-fonte)"}
     return "[expr {$f eq "" ? "Sem título" : [file tail $f]}]:$line"
 }
 
 # Só as definições que têm código-fonte para abrir.
 proc qc::defsWithSource {defs} {
-    lmap d $defs { if {[lindex $d 3] == 0} continue; set d }
+    lmap d $defs {if {[lindex $d 3] == 0} {continue}; set d}
 }
 
 # F12 (idx = insert) ou Ctrl+clique (idx = @x,y).
@@ -2782,9 +2847,11 @@ proc qc::goToDefinition {{idx insert}} {
     set others [defsElsewhere $all $a]
     set defs [defsWithSource $others]
     if {![llength $defs]} {
-        set ::qc::status [expr {[llength $others] ? "$name é embutido (sem código-fonte)"
+        set ::qc::status [expr {
+            [llength $others] ? "$name é embutido (sem código-fonte)"
             : [llength $all] ? "Já está na definição de $name"
-            : "Definição de $name não encontrada"}]
+            : "Definição de $name não encontrada"
+        }]
         return
     }
     if {[llength $defs] == 1} {
@@ -2797,11 +2864,11 @@ proc qc::goToDefinition {{idx insert}} {
     menu $m -tearoff 0
     foreach d $defs {
         set txt [lindex [split [lindex $d 5] \n] 0]
-        if {[string length $txt] > 70} { set txt "[string range $txt 0 68]…" }
+        if {[string length $txt] > 70} {set txt "[string range $txt 0 68]…"}
         $m add command -label "[defLabel $d]   $txt" -command [list qc::gotoDef $d]
     }
     set bb [$ed bbox $a]
-    if {![llength $bb]} { set bb {0 0 0 0} }
+    if {![llength $bb]} {set bb {0 0 0 0}}
     tk_popup $m [expr {[winfo rootx $ed] + [lindex $bb 0]}] \
         [expr {[winfo rooty $ed] + [lindex $bb 1] + [lindex $bb 3]}]
 }
@@ -2813,7 +2880,7 @@ proc qc::gotoDef {d} {
         activateTab $w
     } else {
         openFile $f
-        if {$::qc::file ne $f} return
+        if {$::qc::file ne $f} {return}
     }
     gotoLine $line $col
     set ::qc::status "$name — [defLabel $d]   (Alt+← volta)"
@@ -2839,7 +2906,7 @@ proc qc::navBack {} {
         activateTab $w
     } elseif {$f ne ""} {
         openFile $f
-        if {$::qc::file ne $f} return
+        if {$::qc::file ne $f} {return}
     } else {
         return
     }
@@ -2872,9 +2939,9 @@ proc qc::tipHide {} {
 
 # Palavra sob o mouse ({} se o ponteiro não está sobre texto).
 proc qc::wordUnderMouse {w x y} {
-    if {$w ne $::qc::ed} { return {} }
+    if {$w ne $::qc::ed} {return {}}
     set wd [wordAt @$x,$y 0]
-    if {![llength $wd]} { return {} }
+    if {![llength $wd]} {return {}}
     # fora do texto (depois do fim da linha) o índice "@x,y" cai no fim
     set bb [$w bbox [lindex $wd 1]]
     if {![llength $bb] || $y < [lindex $bb 1] || $y > [lindex $bb 1] + [lindex $bb 3]} {
@@ -2887,23 +2954,24 @@ proc qc::wordUnderMouse {w x y} {
 # variáveis, strings e comentários.
 proc qc::defsForWord {wd} {
     lassign $wd name a
-    if {[inLiteral $a]} { return {} }
-    foreach t [$::qc::ed tag names $a] { if {$t in {keyword var}} { return {} } }
+    if {[inLiteral $a]} {return {}}
+    foreach t [$::qc::ed tag names $a] {if {$t in {keyword var}} {return {}}}
     return [defsElsewhere [findDefs $name] $a]
 }
 
 proc qc::hoverSched {w x y {state 0}} {
     variable tipAfter
     variable tipKey
-    if {$state & 4} { linkUpdate $w $x $y } else { linkClear }
-    if {!$::qc::cfg(hoverdef) || $w ne $::qc::ed} return
+    if {$state & 4} {linkUpdate $w $x $y} else {linkClear}
+    if {!$::qc::cfg(hoverdef) || $w ne $::qc::ed} {return}
     after cancel $tipAfter
     set wd [wordUnderMouse $w $x $y]
     set key [lrange $wd 0 1]
-    if {$key eq $tipKey && [winfo exists .tip]} return
+    if {$key eq $tipKey && [winfo exists .tip]} {return}
     catch {destroy .tip}
     set tipKey ""
-    if {![llength $wd]} return
+    if {![llength $wd]} {return}
+    # tclint-disable-next-line command-args
     set tipAfter [after 450 [list qc::tipShow $w $wd $x $y]]
 }
 
@@ -2913,9 +2981,9 @@ proc qc::linkUpdate {w x y} {
     variable linkKey
     set wd [wordUnderMouse $w $x $y]
     set key [lrange $wd 0 1]
-    if {$key eq $linkKey} return
+    if {$key eq $linkKey} {return}
     linkClear
-    if {![llength $wd] || ![llength [defsWithSource [defsForWord $wd]]]} return
+    if {![llength $wd] || ![llength [defsWithSource [defsForWord $wd]]]} {return}
     set linkKey $key
     $w tag add deflink [lindex $wd 1] [lindex $wd 2]
     $w configure -cursor hand2
@@ -2923,7 +2991,7 @@ proc qc::linkUpdate {w x y} {
 
 proc qc::linkClear {} {
     variable linkKey
-    if {$linkKey eq ""} return
+    if {$linkKey eq ""} {return}
     set linkKey ""
     foreach w $::qc::tabs {
         $w tag remove deflink 1.0 end
@@ -2934,7 +3002,7 @@ proc qc::linkClear {} {
 # Ctrl apertado com o mouse já parado sobre o editor.
 proc qc::linkAtPointer {w} {
     lassign [winfo pointerxy $w] px py
-    if {[winfo containing $px $py] ne $w} return
+    if {[winfo containing $px $py] ne $w} {return}
     linkUpdate $w [expr {$px - [winfo rootx $w]}] [expr {$py - [winfo rooty $w]}]
 }
 
@@ -2952,10 +3020,10 @@ proc qc::ctrlClick {w x y} {
 proc qc::tipShow {w wd x y} {
     variable C
     variable tipKey
-    if {$w ne $::qc::ed || ![winfo exists $w]} return
+    if {$w ne $::qc::ed || ![winfo exists $w]} {return}
     lassign $wd name a
     set defs [defsForWord $wd]
-    if {![llength $defs]} return
+    if {![llength $defs]} {return}
     set tipKey [lrange $wd 0 1]
 
     set t .tip
@@ -2972,17 +3040,17 @@ proc qc::tipShow {w wd x y} {
     set n 0
     foreach d $defs {
         # até 3 definições, parando antes se a dica já estiver grande
-        if {$n >= 3 || ($n > 0 && [$t.t count -lines 1.0 end] > 18)} break
+        if {$n >= 3 || ($n > 0 && [$t.t count -lines 1.0 end] > 18)} {break}
         incr n
         lassign $d f - - line - sig doc post
-        if {$n > 1} { $t.t insert end \n }
+        if {$n > 1} {$t.t insert end \n}
         $t.t insert end "[defLabel $d]\n" loc
-        foreach dl $doc { $t.t insert end "$dl\n" doc }
+        foreach dl $doc {$t.t insert end "$dl\n" doc}
         foreach sl [split $sig \n] {
-            if {[string length $sl] > 120} { set sl "[string range $sl 0 118]…" }
+            if {[string length $sl] > 120} {set sl "[string range $sl 0 118]…"}
             $t.t insert end "$sl\n" sig
         }
-        foreach dl $post { $t.t insert end "$dl\n" doc }
+        foreach dl $post {$t.t insert end "$dl\n" doc}
     }
     if {[llength $defs] > $n} {
         $t.t insert end "+[expr {[llength $defs] - $n}] outras (F12 para escolher)\n" loc
@@ -3003,8 +3071,8 @@ proc qc::tipShow {w wd x y} {
     set th [winfo reqheight $t]
     set sw [winfo screenwidth $t]
     set sh [winfo screenheight $t]
-    if {$rx + $tw > $sw} { set rx [expr {max(0, $sw - $tw)}] }
-    if {$ry + $th > $sh} { set ry [expr {[winfo rooty $w] + [lindex $bb 1] - $th - 4}] }
+    if {$rx + $tw > $sw} {set rx [expr {max(0, $sw - $tw)}]}
+    if {$ry + $th > $sh} {set ry [expr {[winfo rooty $w] + [lindex $bb 1] - $th - 4}]}
     wm geometry $t +$rx+$ry
     wm deiconify $t
     raise $t
@@ -3025,7 +3093,7 @@ proc qc::regSave {id} {
     if {[llength [::qc::_edw tag ranges sel]]} {
         set f [::qc::_edw index sel.first]
         set anchor $f
-        if {$i eq $f} { set anchor [::qc::_edw index sel.last] }
+        if {$i eq $f} {set anchor [::qc::_edw index sel.last]}
     }
     regSet $id $anchor $i
 }
@@ -3049,7 +3117,7 @@ proc qc::regSet {id anchor caret} {
 proc qc::regGet {id} {
     set a [::qc::_edw index qcm${id}a]
     set b [::qc::_edw index qcm${id}b]
-    if {[::qc::_edw compare $a > $b]} { return [list $b $a] }
+    if {[::qc::_edw compare $a > $b]} {return [list $b $a]}
     return [list $a $b]
 }
 
@@ -3060,7 +3128,7 @@ proc qc::regCaret {id} {
 proc qc::regLoad {id} {
     lassign [regGet $id] a b
     ::qc::_edw tag remove sel 1.0 end
-    if {[::qc::_edw compare $a < $b]} { ::qc::_edw tag add sel $a $b }
+    if {[::qc::_edw compare $a < $b]} {::qc::_edw tag add sel $a $b}
     $::qc::ed mark set insert [regCaret $id]
 }
 
@@ -3103,14 +3171,14 @@ proc qc::multiApply {script} {
     $ed see insert
 }
 
-proc qc::regKey {a b} { return "$a $b" }
+proc qc::regKey {a b} {return "$a $b"}
 
 proc qc::multiRedraw {} {
     variable mcur
     ::qc::_edw tag remove msel 1.0 end
     foreach id $mcur {
         lassign [regGet $id] a b
-        if {[::qc::_edw compare $a < $b]} { ::qc::_edw tag add msel $a $b }
+        if {[::qc::_edw compare $a < $b]} {::qc::_edw tag add msel $a $b}
     }
     ::qc::_edw tag raise msel
     drawCarets
@@ -3124,7 +3192,7 @@ proc qc::drawCarets {} {
     set i 0
     foreach id $mcur {
         set bb [::qc::_edw bbox qcm${id}b]
-        if {$bb eq ""} continue
+        if {$bb eq ""} {continue}
         lassign $bb x y - h
         set w $ed.mc$i
         if {![winfo exists $w]} {
@@ -3143,8 +3211,8 @@ proc qc::drawCarets {} {
 proc qc::multiClear {} {
     variable mcur
     variable mlast ""
-    if {![llength $mcur]} return
-    foreach id $mcur { ::qc::_edw mark unset qcm${id}a qcm${id}b }
+    if {![llength $mcur]} {return}
+    foreach id $mcur {::qc::_edw mark unset qcm${id}a qcm${id}b}
     set mcur {}
     ::qc::_edw tag remove msel 1.0 end
     drawCarets
@@ -3162,23 +3230,27 @@ proc qc::multiAdd {a b} {
 # Tecla com vários cursores ativos (bindtag QcMulti, antes das demais).
 proc qc::multiKey {K A s} {
     variable mcur
-    if {![llength $mcur]} return
-    if {[string match *_L $K] || [string match *_R $K]
-        || $K in {Caps_Lock Num_Lock ISO_Level3_Shift Mode_switch Multi_key}} return
+    if {![llength $mcur]} {return}
+    if {
+        [string match *_L $K] || [string match *_R $K]
+        || $K in {Caps_Lock Num_Lock ISO_Level3_Shift Mode_switch Multi_key}
+    } {return}
     if {$s & 0x0C} {
         # Ctrl+D continua adicionando, Ctrl+V cola em todos (via qc::paste),
         # Ctrl+S/R não mexem no texto; o resto volta a um cursor só
-        if {!($s & 4 && [string tolower $K] in {d v s r})
-            && !($s & 8 && $K in {Up Down})} { multiClear }
+        if {
+            !($s & 4 && [string tolower $K] in {d v s r})
+            && !($s & 8 && $K in {Up Down})
+        } {multiClear}
         return
     }
     set shift [expr {$s & 1}]
     switch -- $K {
-        Escape            { multiClear; return -code break }
-        BackSpace         { multiApply qc::backspace }
-        Delete - KP_Delete { multiApply qc::deleteFwd }
-        Return - KP_Enter { multiApply qc::newline }
-        Tab               { multiApply {qc::indent 1} }
+        Escape {multiClear; return -code break}
+        BackSpace {multiApply qc::backspace}
+        Delete - KP_Delete {multiApply qc::deleteFwd}
+        Return - KP_Enter {multiApply qc::newline}
+        Tab {multiApply {qc::indent 1}}
         Left - Right - Home - End - Up - Down {
             multiApply [list qc::moveCaret $K $shift]
         }
@@ -3188,7 +3260,7 @@ proc qc::multiKey {K A s} {
             } else {
                 # PageUp/PageDown voltam a um cursor; teclas mortas (acentos)
                 # e outras sem caractere são ignoradas
-                if {$K in {Prior Next}} { multiClear }
+                if {$K in {Prior Next}} {multiClear}
                 return
             }
         }
@@ -3207,22 +3279,24 @@ proc qc::moveCaret {k {shift 0}} {
         # linha(s) inteira(s) selecionada(s): fim da última linha, não o
         # começo da seguinte
         set to sel.last
-        if {[$ed compare sel.last == "sel.last linestart"]
-            && [$ed compare sel.first < sel.last]} { set to "sel.last -1c" }
+        if {
+            [$ed compare sel.last == "sel.last linestart"]
+            && [$ed compare sel.first < sel.last]
+        } {set to "sel.last -1c"}
     } else {
         set to [dict get {
             Left "insert -1c" Right "insert +1c" Home "insert linestart"
             End "insert lineend" Up "insert -1 line" Down "insert +1 line"
         } $k]
-        if {$k eq "Home"} { set to [smartHome] }
+        if {$k eq "Home"} {set to [smartHome]}
     }
     set to [$ed index $to]
-    if {[$ed compare $to > end-1c]} { set to [$ed index end-1c] }
+    if {[$ed compare $to > end-1c]} {set to [$ed index end-1c]}
     set anchor $ins
     if {$hasSel} {
         set f [$ed index sel.first]
         set anchor $f
-        if {$ins eq $f} { set anchor [$ed index sel.last] }
+        if {$ins eq $f} {set anchor [$ed index sel.last]}
     }
     ::qc::_edw tag remove sel 1.0 end
     if {$shift && [$ed compare $anchor != $to]} {
@@ -3243,13 +3317,13 @@ proc qc::smartHome {} {
     set line [$ed get $ls "insert lineend"]
     regexp -indices {^[ \t]*} $line m
     set first [$ed index "$ls +[expr {[lindex $m 1] + 1}]c"]
-    if {[$ed compare insert == $first]} { return $ls }
+    if {[$ed compare insert == $first]} {return $ls}
     return $first
 }
 
 # ←/→ sem Shift com texto selecionado: cursor no início/fim da seleção.
 proc qc::selJump {k state} {
-    if {$state & 0x0D || ![llength [::qc::_edw tag ranges sel]]} { return 0 }
+    if {$state & 0x0D || ![llength [::qc::_edw tag ranges sel]]} {return 0}
     moveCaret $k
     $::qc::ed see insert
     return 1
@@ -3269,7 +3343,7 @@ proc qc::selectNext {{redraw 1}} {
             multiApply qc::selectWord
             return 0
         }
-        if {![selectWord]} { return 0 }
+        if {![selectWord]} {return 0}
         set mword [list [$ed index sel.first] [$ed index sel.last]]
         return 1
     }
@@ -3277,18 +3351,18 @@ proc qc::selectNext {{redraw 1}} {
     set sb [$ed index sel.last]
     if {![llength $mcur]} {
         set mlast ""
-        if {$mword ne [list $sa $sb]} { set mword "" }
+        if {$mword ne [list $sa $sb]} {set mword ""}
     }
     set text [$ed get $sa $sb]
     set len [string length $text]
     # (não usar expr aqui: ele transformaria o índice "2.10" no número 2.1)
     set start $sb
-    if {$mlast ne "" && $mlast in $mcur} { set start [lindex [regGet $mlast] 1] }
+    if {$mlast ne "" && $mlast in $mcur} {set start [lindex [regGet $mlast] 1]}
     set taken [list $sa]
-    foreach id $mcur { lappend taken [lindex [regGet $id] 0] }
+    foreach id $mcur {lappend taken [lindex [regGet $id] 0]}
     for {set n 0} {$n < 100000} {incr n} {
         set pos [::qc::_edw search -exact -forwards -- $text $start]
-        if {$pos eq ""} { return 0 }
+        if {$pos eq ""} {return 0}
         set end [::qc::_edw index "$pos +${len}c"]
         if {$pos in $taken} {
             set ::qc::status "Todas as ocorrências já estão selecionadas ([expr {[llength $mcur] + 1}])"
@@ -3297,7 +3371,7 @@ proc qc::selectNext {{redraw 1}} {
         set start $end
         if {$mword ne ""} {
             set before [expr {[$ed compare $pos == 1.0] ? "" : [$ed get "$pos -1c"]}]
-            if {[regexp {\w} $before] || [regexp {\w} [$ed get $end]]} continue
+            if {[regexp {\w} $before] || [regexp {\w} [$ed get $end]]} {continue}
         }
         break
     }
@@ -3315,7 +3389,7 @@ proc qc::selectWord {} {
     variable ed
     set i insert
     if {![regexp {\w} [$ed get insert]]} {
-        if {[$ed compare insert == 1.0] || ![regexp {\w} [$ed get "insert -1c"]]} { return 0 }
+        if {[$ed compare insert == 1.0] || ![regexp {\w} [$ed get "insert -1c"]]} {return 0}
         set i "insert -1c"
     }
     set a [$ed index "$i wordstart"]
@@ -3329,7 +3403,7 @@ proc qc::selectWord {} {
 # Alt+F3: seleciona todas as ocorrências de uma vez.
 proc qc::selectAllOcc {} {
     variable ed
-    if {![llength [::qc::_edw tag ranges sel]] && ![selectNext]} return
+    if {![llength [::qc::_edw tag ranges sel]] && ![selectNext]} {return}
     while {[selectNext 0]} {}
     multiRedraw
     set ::qc::status "[expr {[llength $::qc::mcur] + 1}] seleções"
@@ -3341,12 +3415,12 @@ proc qc::addCaretLine {dir} {
     variable ed
     variable mcur
     variable mcol
-    if {![llength $mcur]} { set mcol [lindex [split [$ed index insert] .] 1] }
+    if {![llength $mcur]} {set mcol [lindex [split [$ed index insert] .] 1]}
     set lines [list [lindex [split [$ed index insert] .] 0]]
-    foreach id $mcur { lappend lines [lindex [split [regCaret $id] .] 0] }
+    foreach id $mcur {lappend lines [lindex [split [regCaret $id] .] 0]}
     set l [expr {$dir < 0 ? [tcl::mathfunc::min {*}$lines] - 1 : [tcl::mathfunc::max {*}$lines] + 1}]
     set last [lindex [split [$ed index end-1c] .] 0]
-    if {$l < 1 || $l > $last} return
+    if {$l < 1 || $l > $last} {return}
     set len [lindex [split [$ed index "$l.0 lineend"] .] 1]
     set i $l.[expr {min($mcol, $len)}]
     multiAdd $i $i
@@ -3377,7 +3451,7 @@ proc qc::toggleComment {} {
     set all 1
     for {set l $a} {$l <= $z} {incr l} {
         set line [$ed get $l.0 "$l.0 lineend"]
-        if {[string trim $line] ne "" && ![regexp "^\\s*$q.*$qe" $line]} { set all 0; break }
+        if {[string trim $line] ne "" && ![regexp "^\\s*$q.*$qe" $line]} {set all 0; break}
     }
     atomic {
         for {set l $a} {$l <= $z} {incr l} {
@@ -3408,7 +3482,7 @@ proc qc::zoom {d} {
     } else {
         set cfg(fontsize) [expr {max(6, min(48, $cfg(fontsize) + $d))}]
     }
-    foreach f {QcMono QcMonoB QcMonoI} { font configure $f -size $cfg(fontsize) }
+    foreach f {QcMono QcMonoB QcMonoI} {font configure $f -size $cfg(fontsize)}
     updateTabs
     schedGutter
     set ::qc::status "Fonte: $cfg(fontsize) pt"
@@ -3437,10 +3511,10 @@ proc qc::showFind {replace} {
     grid .pw.ed.find
     if {[llength [$ed tag ranges sel]]} {
         set s [$ed get sel.first sel.last]
-        if {[string first \n $s] < 0} { set find(pat) $s }
+        if {[string first \n $s] < 0} {set find(pat) $s}
     }
     set e [expr {$replace ? ".pw.ed.find.rep" : ".pw.ed.find.pat"}]
-    if {$replace && $find(pat) eq ""} { set e .pw.ed.find.pat }
+    if {$replace && $find(pat) eq ""} {set e .pw.ed.find.pat}
     focus $e
     $e selection range 0 end
     markAll
@@ -3455,8 +3529,8 @@ proc qc::hideFind {} {
 proc qc::searchOpts {} {
     variable find
     set o {}
-    if {!$find(case)}  { lappend o -nocase }
-    if {$find(regex)}  { lappend o -regexp }
+    if {!$find(case)} {lappend o -nocase}
+    if {$find(regex)} {lappend o -regexp}
     return $o
 }
 
@@ -3466,7 +3540,7 @@ proc qc::markAll {} {
     ::qc::_edw tag remove found 1.0 end
     .pw.ed.find.pat configure -style TEntry
     set find(info) ""
-    if {$find(pat) eq "" || ![winfo ismapped .pw.ed.find]} return
+    if {$find(pat) eq "" || ![winfo ismapped .pw.ed.find]} {return}
     set cnt {}
     if {[catch {::qc::_edw search {*}[searchOpts] -all -count cnt -- $find(pat) 1.0 end} hits]} {
         set find(info) "regex inválida"
@@ -3475,17 +3549,17 @@ proc qc::markAll {} {
     }
     set r {}
     foreach h $hits n $cnt {
-        if {$n > 0} { lappend r $h "$h +${n}c" }
+        if {$n > 0} {lappend r $h "$h +${n}c"}
     }
-    if {[llength $r]} { ::qc::_edw tag add found {*}$r }
+    if {[llength $r]} {::qc::_edw tag add found {*}$r}
     set find(info) "[llength $hits] ocorrência(s)"
-    if {![llength $hits]} { .pw.ed.find.pat configure -style NotFound.TEntry }
+    if {![llength $hits]} {.pw.ed.find.pat configure -style NotFound.TEntry}
 }
 
 proc qc::findNext {fwd} {
     variable ed
     variable find
-    if {$find(pat) eq ""} { showFind 0; return }
+    if {$find(pat) eq ""} {showFind 0; return}
     if {$fwd} {
         set start [expr {[llength [$ed tag ranges sel]] ? "sel.last" : "insert"}]
         set dir -forwards
@@ -3493,7 +3567,7 @@ proc qc::findNext {fwd} {
         set start [expr {[llength [$ed tag ranges sel]] ? "sel.first" : "insert"}]
         set dir -backwards
     }
-    if {[catch {::qc::_edw search $dir {*}[searchOpts] -count n -- $find(pat) $start} idx]} return
+    if {[catch {::qc::_edw search $dir {*}[searchOpts] -count n -- $find(pat) $start} idx]} {return}
     if {$idx eq ""} {
         set ::qc::status "Não encontrado: $find(pat)"
         return
@@ -3507,9 +3581,9 @@ proc qc::findNext {fwd} {
 
 proc qc::replaceText {matched} {
     variable find
-    if {!$find(regex)} { return $find(rep) }
+    if {!$find(regex)} {return $find(rep)}
     set o {}
-    if {!$find(case)} { lappend o -nocase }
+    if {!$find(case)} {lappend o -nocase}
     regsub {*}$o -- $find(pat) $matched $find(rep) out
     return $out
 }
@@ -3520,8 +3594,10 @@ proc qc::replaceOne {} {
     if {[llength [$ed tag ranges sel]]} {
         set s [$ed get sel.first sel.last]
         set o [searchOpts]
-        if {[catch {::qc::_edw search {*}$o -count n -- $find(pat) sel.first sel.last} idx] == 0
-                && $idx ne "" && [$ed compare $idx == sel.first] && $n == [string length $s]} {
+        if {
+            [catch {::qc::_edw search {*}$o -count n -- $find(pat) sel.first sel.last} idx] == 0
+            && $idx ne "" && [$ed compare $idx == sel.first] && $n == [string length $s]
+        } {
             set a [$ed index sel.first]
             atomic {
                 $ed delete sel.first sel.last
@@ -3536,9 +3612,9 @@ proc qc::replaceOne {} {
 proc qc::replaceAll {} {
     variable ed
     variable find
-    if {$find(pat) eq ""} return
+    if {$find(pat) eq ""} {return}
     set cnt {}
-    if {[catch {::qc::_edw search {*}[searchOpts] -all -count cnt -- $find(pat) 1.0 end} hits]} return
+    if {[catch {::qc::_edw search {*}[searchOpts] -all -count cnt -- $find(pat) 1.0 end} hits]} {return}
     atomic {
         set k 0
         foreach h [lreverse $hits] n [lreverse $cnt] {
@@ -3555,7 +3631,7 @@ proc qc::replaceAll {} {
 
 proc qc::gotoDialog {} {
     set w .goto
-    if {[winfo exists $w]} { raise $w; focus $w.e; return }
+    if {[winfo exists $w]} {raise $w; focus $w.e; return}
     toplevel $w -background $::qc::C(ui)
     wm title $w "Ir para linha"
     wm transient $w .
@@ -3597,27 +3673,27 @@ proc qc::gotoLine {n {col 0}} {
 
 proc qc::runnerNames {{id ""}} {
     set out {}
-    foreach r [lget runners $id] { lappend out [dict get $r name] }
+    foreach r [lget runners $id] {lappend out [dict get $r name]}
     return $out
 }
 
 # Executável do runner: opção do usuário, variável QCONSOLE_<LANG>, hook
 # findExe da linguagem ou busca no PATH pelos nomes em "exe".
 proc qc::findExe {rn {id ""}} {
-    if {$id eq ""} { set id $::qc::lang }
+    if {$id eq ""} {set id $::qc::lang}
     set name [dict get $rn name]
     set user [lcfg exe.$name $id]
-    if {$user ne ""} { return [list $user] }
+    if {$user ne ""} {return [list $user]}
     set ev QCONSOLE_[string toupper $id]
-    if {[info exists ::env($ev)]} { return [list $::env($ev)] }
+    if {[info exists ::env($ev)]} {return [list $::env($ev)]}
     set h [hook findExe $id]
     if {$h ne ""} {
         set p [$h $rn]
-        if {$p ne ""} { return $p }
+        if {$p ne ""} {return $p}
     }
     foreach n [dict get $rn exe] {
         set p [auto_execok $n]
-        if {$p ne ""} { return $p }
+        if {$p ne ""} {return $p}
     }
     return ""
 }
@@ -3625,22 +3701,22 @@ proc qc::findExe {rn {id ""}} {
 # Runner corrente: o escolhido nas opções, se disponível, ou o primeiro
 # encontrado. Retorna o dicionário da linguagem mesclado com o do runner.
 proc qc::currentRunner {{id ""}} {
-    if {$id eq ""} { set id $::qc::lang }
+    if {$id eq ""} {set id $::qc::lang}
     set rs [lget runners $id]
-    if {![llength $rs]} { return "" }
+    if {![llength $rs]} {return ""}
     set want [lcfg runner $id]
     foreach r $rs {
-        if {[dict get $r name] eq $want && [findExe $r $id] ne ""} { return $r }
+        if {[dict get $r name] eq $want && [findExe $r $id] ne ""} {return $r}
     }
     foreach r $rs {
-        if {[findExe $r $id] ne ""} { return $r }
+        if {[findExe $r $id] ne ""} {return $r}
     }
     return [lindex $rs 0]
 }
 
 # Onde o executável é procurado (para mensagens).
 proc qc::runnerSearched {rn} {
-    if {[dict exists $rn searchHint]} { return [dict get $rn searchHint] }
+    if {[dict exists $rn searchHint]} {return [dict get $rn searchHint]}
     return [join [dict get $rn exe] {, }]
 }
 
@@ -3653,14 +3729,14 @@ proc qc::detectVersion {} {
     variable V
     variable lang
     set rn [currentRunner]
-    if {$rn eq ""} { set ::qc::interp "sem interpretador"; return }
+    if {$rn eq ""} {set ::qc::interp "sem interpretador"; return}
     set key $lang,[dict get $rn name]
     set exe [findExe $rn]
     if {$exe eq ""} {
         set ::qc::interp "[runnerLabel $rn] não encontrado"
         return
     }
-    if {[info exists V($key)]} { showVersion; return }
+    if {[info exists V($key)]} {showVersion; return}
     set ::qc::interp "[runnerLabel $rn] …"
     set stdin [expr {[dict exists $rn versionStdin] ? [dict get $rn versionStdin] : ""}]
     set vargs [expr {[dict exists $rn version] ? [dict get $rn version] : "--version"}]
@@ -3671,13 +3747,13 @@ proc qc::detectVersion {} {
     }
     fconfigure $f -blocking 0
     set ::qc::verBuf($f) ""
-    fileevent $f readable [list qc::onVersion $f $key $rn]
+    chan event $f readable [list qc::onVersion $f $key $rn]
 }
 
 proc qc::onVersion {f key rn} {
     variable V
     append ::qc::verBuf($f) [read $f]
-    if {![eof $f]} return
+    if {![eof $f]} {return}
     catch {close $f}
     set out [stripAnsi $::qc::verBuf($f)]
     unset ::qc::verBuf($f)
@@ -3697,7 +3773,7 @@ proc qc::showVersion {} {
 proc qc::langVersion {} {
     variable V
     set rn [currentRunner]
-    if {$rn eq ""} { return "" }
+    if {$rn eq ""} {return ""}
     set key $::qc::lang,[dict get $rn name]
     return [expr {[info exists V($key)] ? $V($key) : ""}]
 }
@@ -3709,13 +3785,13 @@ proc qc::langVersion {} {
 proc qc::optionsDialog {} {
     variable cfg
     set w .opts
-    if {[winfo exists $w]} { destroy $w }
+    if {[winfo exists $w]} {destroy $w}
     set names [runnerNames]
     set rn [currentRunner]
     set ::qc::optTmp(runner) [expr {$rn eq "" ? "" : [dict get $rn name]}]
-    set ::qc::optTmp(opts)   [lcfg opts]
-    set ::qc::optTmp(args)   [lcfg args]
-    set ::qc::optTmp(exe)    [lcfg exe.$::qc::optTmp(runner)]
+    set ::qc::optTmp(opts) [lcfg opts]
+    set ::qc::optTmp(args) [lcfg args]
+    set ::qc::optTmp(exe) [lcfg exe.$::qc::optTmp(runner)]
     toplevel $w -background $::qc::C(ui)
     wm title $w "Opções de execução — [lget name]"
     wm transient $w .
@@ -3755,7 +3831,7 @@ proc qc::optionsDialog {} {
 
 proc qc::optionsRunner {} {
     foreach r [lget runners] {
-        if {[dict get $r name] eq $::qc::optTmp(runner)} { return $r }
+        if {[dict get $r name] eq $::qc::optTmp(runner)} {return $r}
     }
     return ""
 }
@@ -3768,14 +3844,16 @@ proc qc::optionsRunnerChanged {} {
 proc qc::optionsHints {} {
     set w .opts.f
     set rn [optionsRunner]
-    if {$rn eq ""} return
+    if {$rn eq ""} {return}
     set saved [lcfg exe.[dict get $rn name]]
     set ::qc::cfg(exe.[dict get $rn name].$::qc::lang) ""
     set found [findExe $rn]
     set ::qc::cfg(exe.[dict get $rn name].$::qc::lang) $saved
-    $w.hx configure -text [expr {$found eq ""
+    $w.hx configure -text [expr {
+        $found eq ""
         ? "não encontrado (procurados: [runnerSearched $rn])"
-        : "vazio = [join $found]"}]
+        : "vazio = [join $found]"
+    }]
     $w.ho configure -text [expr {[dict exists $rn optsHint] ? "ex.: [dict get $rn optsHint]" : ""}]
 }
 
@@ -3784,8 +3862,8 @@ proc qc::optionsApply {} {
     variable lang
     set r $::qc::optTmp(runner)
     set cfg(runner.$lang) $r
-    set cfg(opts.$lang)   [string trim $::qc::optTmp(opts)]
-    set cfg(args.$lang)   [string trim $::qc::optTmp(args)]
+    set cfg(opts.$lang) [string trim $::qc::optTmp(opts)]
+    set cfg(args.$lang) [string trim $::qc::optTmp(args)]
     set cfg(exe.$r.$lang) [string trim $::qc::optTmp(exe)]
     catch {unset ::qc::V($lang,$r)}
     destroy .opts
@@ -3827,7 +3905,7 @@ proc qc::newEditor {} {
 }
 
 proc qc::onModified {w} {
-    if {$w eq $::qc::ed} { updateTitle } else { drawTabs }
+    if {$w eq $::qc::ed} {updateTitle} else {drawTabs}
 }
 
 proc qc::activateTab {w} {
@@ -3856,7 +3934,7 @@ proc qc::activateTab {w} {
     }
     .pw.ed.sy set {*}[$w yview]
     .pw.ed.sx set {*}[$w xview]
-    if {[winfo ismapped .pw.ed.find]} { markAll }
+    if {[winfo ismapped .pw.ed.find]} {markAll}
     treeReveal
     updateCursor
     focus $w
@@ -3865,8 +3943,10 @@ proc qc::activateTab {w} {
 # Aba para um arquivo novo: reaproveita a ativa se for "Sem título" e vazia.
 proc qc::freshTab {} {
     variable ed
-    if {$ed ne "" && $::qc::TB($ed,file) eq "" && ![$ed edit modified]
-        && [$ed compare end-1c == 1.0]} {
+    if {
+        $ed ne "" && $::qc::TB($ed,file) eq "" && ![$ed edit modified]
+        && [$ed compare end-1c == 1.0]
+    } {
         return $ed
     }
     set w [newEditor]
@@ -3876,7 +3956,7 @@ proc qc::freshTab {} {
 
 proc qc::tabForFile {path} {
     foreach w $::qc::tabs {
-        if {$path ne "" && $::qc::TB($w,file) eq $path} { return $w }
+        if {$path ne "" && $::qc::TB($w,file) eq $path} {return $w}
     }
     return ""
 }
@@ -3886,10 +3966,10 @@ proc qc::tabForFile {path} {
 proc qc::closeTab {w} {
     variable tabs
     variable TB
-    if {![winfo exists $w]} { return 1 }
+    if {![winfo exists $w]} {return 1}
     if {[$w edit modified]} {
         activateTab $w
-        if {![confirmDiscard]} { return 0 }
+        if {![confirmDiscard]} {return 0}
     }
     if {[llength $tabs] == 1} {
         variable file ""
@@ -3911,23 +3991,23 @@ proc qc::closeTab {w} {
 
 proc qc::closeOtherTabs {w} {
     foreach t $::qc::tabs {
-        if {$t ne $w && ![closeTab $t]} break
+        if {$t ne $w && ![closeTab $t]} {break}
     }
-    if {[winfo exists $w]} { activateTab $w }
+    if {[winfo exists $w]} {activateTab $w}
 }
 
 # Ctrl+Tab / Ctrl+Shift+Tab (e Ctrl+PgDn / Ctrl+PgUp)
 proc qc::cycleTab {d} {
     variable tabs
     set n [llength $tabs]
-    if {$n < 2} return
+    if {$n < 2} {return}
     set i [lsearch -exact $tabs $::qc::ed]
     activateTab [lindex $tabs [expr {($i + $d) % $n}]]
 }
 
 # Link da saída: volta para a aba onde o programa foi executado.
 proc qc::gotoTabLine {w line col} {
-    if {[winfo exists $w]} { activateTab $w }
+    if {[winfo exists $w]} {activateTab $w}
     gotoLine $line $col
 }
 
@@ -3972,7 +4052,7 @@ set ::qc::tabBarW 0
 
 # Só altera a barra de status se o texto mudou (evita relayout à toa).
 proc qc::setStatus {msg} {
-    if {$::qc::status ne $msg} { set ::qc::status $msg }
+    if {$::qc::status ne $msg} {set ::qc::status $msg}
 }
 
 proc qc::drawTabs {} {
@@ -3980,13 +4060,13 @@ proc qc::drawTabs {} {
     variable TB
     variable C
     set c .pw.ed.tabs
-    if {![winfo exists $c]} return
+    if {![winfo exists $c]} {return}
     $c delete all
     set h [winfo reqheight $c]
     # nomes repetidos ganham o nome da pasta
     set tails {}
     foreach w $tabs {
-        if {$TB($w,file) ne ""} { dict incr tails [file tail $TB($w,file)] }
+        if {$TB($w,file) ne ""} {dict incr tails [file tail $TB($w,file)]}
     }
     set x 0
     set ax0 0
@@ -4067,14 +4147,14 @@ proc qc::updateTitle {} {
 }
 
 proc qc::confirmDiscard {} {
-    if {![$::qc::ed edit modified]} { return 1 }
+    if {![$::qc::ed edit modified]} {return 1}
     set r [tk_messageBox -parent . -icon warning -type yesnocancel \
         -title qconsole -message "Salvar as alterações?" \
         -detail "O arquivo foi modificado."]
     switch -- $r {
-        yes     { return [save] }
-        no      { return 1 }
-        default { return 0 }
+        yes {return [save]}
+        no {return 1}
+        default {return 0}
     }
 }
 
@@ -4088,6 +4168,7 @@ proc qc::setContent {data} {
     $ed mark set insert 1.0
     $ed see 1.0
     ::qc::_edw tag remove errline 1.0 end
+    ::qc::_edw tag remove warnline 1.0 end
     highlight
     updateTitle
 }
@@ -4134,9 +4215,9 @@ proc qc::fileTypes {} {
 proc qc::langForFile {path} {
     variable langs
     set ext [string tolower [file extension $path]]
-    if {$ext in [lget ext]} { return $::qc::lang }
+    if {$ext in [lget ext]} {return $::qc::lang}
     foreach id $langs {
-        if {$ext in [lget ext $id]} { return $id }
+        if {$ext in [lget ext $id]} {return $id}
     }
     return ""
 }
@@ -4149,7 +4230,7 @@ proc qc::openFile {{path ""}} {
             lappend opts -initialdir $cfg(lastdir)
         }
         set path [tk_getOpenFile {*}$opts]
-        if {$path eq ""} return
+        if {$path eq ""} {return}
     }
     # já aberto: só muda para a aba dele
     set w [tabForFile [file normalize $path]]
@@ -4162,12 +4243,12 @@ proc qc::openFile {{path ""}} {
             -message "Não foi possível abrir o arquivo." -detail $data
         return
     }
-    if {[string index $data end] eq "\n"} { set data [string range $data 0 end-1] }
+    if {[string index $data end] eq "\n"} {set data [string range $data 0 end-1]}
     freshTab
     variable file [file normalize $path]
     set cfg(lastdir) [file dirname $file]
     set id [langForFile $file]
-    if {$id ne "" && $id ne $::qc::lang} { setLang $id }
+    if {$id ne "" && $id ne $::qc::lang} {setLang $id}
     setContent $data
     addRecent $file
     treeReveal
@@ -4176,8 +4257,8 @@ proc qc::openFile {{path ""}} {
 
 proc qc::save {} {
     variable file
-    if {$file eq ""} { return [saveAs] }
-    return [saveTo $file]
+    if {$file eq ""} {return [saveAs]}
+    return [fmtAfterSave [saveTo $file]]
 }
 
 proc qc::saveAs {} {
@@ -4186,15 +4267,15 @@ proc qc::saveAs {} {
     set h [hook defaultExt]
     set ext [expr {$h ne "" ? [$h [$::qc::ed get 1.0 end-1c]] : [lindex [lget ext] 0]}]
     set opts [list -parent . -title "Salvar como" -filetypes [fileTypes]]
-    if {$ext ne ""} { lappend opts -defaultextension $ext }
+    if {$ext ne ""} {lappend opts -defaultextension $ext}
     if {$file ne ""} {
         lappend opts -initialdir [file dirname $file] -initialfile [file tail $file]
     } elseif {$cfg(lastdir) ne "" && [file isdirectory $cfg(lastdir)]} {
         lappend opts -initialdir $cfg(lastdir)
     }
     set path [tk_getSaveFile {*}$opts]
-    if {$path eq ""} { return 0 }
-    return [saveTo [file normalize $path]]
+    if {$path eq ""} {return 0}
+    return [fmtAfterSave [saveTo [file normalize $path]]]
 }
 
 # Salva o editor w (padrão: a aba ativa) em path.
@@ -4202,9 +4283,10 @@ proc qc::saveTo {path {w ""}} {
     variable ed
     variable cfg
     variable TB
-    if {$w eq ""} { set w $ed }
+    if {$w eq ""} {set w $ed}
+    set fmtErr [formatOnSave $w]
     set data [$w get 1.0 end-1c]
-    if {$data ne "" && [string index $data end] ne "\n"} { append data \n }
+    if {$data ne "" && [string index $data end] ne "\n"} {append data \n}
     if {[catch {writeFile $path $data} err]} {
         tk_messageBox -parent . -icon error -title qconsole \
             -message "Não foi possível salvar o arquivo." -detail $err
@@ -4224,7 +4306,50 @@ proc qc::saveTo {path {w ""}} {
         refreshFolder
     }
     set ::qc::status "Salvo: $path"
+    if {$fmtErr ne ""} {append ::qc::status "  (não formatado: $fmtErr)"}
     return 1
+}
+
+# --- Formatar ao salvar (cfg(fmtsave.<lang>)) -------------------------------
+# Formatador interno (hook reformat): roda antes de gravar, em saveTo.
+# Ferramenta externa (tclfmt, scalafmt, ocamlformat…): roda em segundo plano
+# depois de um Ctrl+S/Salvar como e, se mudar algo, salva de novo.
+
+# O item do menu Editar segue a linguagem atual.
+proc qc::updateFmtSaveMenu {} {
+    set m .mb.edit
+    set i [$m index "Formatar ao salvar"]
+    set ok [expr {[llength [lget formatters]] || [hook reformat] ne ""}]
+    $m entryconfigure $i -variable ::qc::cfg(fmtsave.$::qc::lang) \
+        -state [expr {$ok ? "normal" : "disabled"}]
+}
+
+# Reformata o editor w com o formatador interno da linguagem dele, se a
+# opção estiver ligada. Devolve a mensagem de erro do formatador, ou "" (o
+# arquivo é salvo de qualquer jeito).
+proc qc::formatOnSave {w} {
+    set id [expr {[info exists ::qc::TB($w,lang)] ? $::qc::TB($w,lang) : $::qc::lang}]
+    if {[lcfg fmtsave $id] ne "1"} {return ""}
+    if {$w eq $::qc::ed && [currentTool formatters] ne ""} {return ""}
+    set h [hook reformat $id]
+    if {$h eq ""} {return ""}
+    set old [$w get 1.0 end-1c]
+    if {[catch {$h $old} new]} {return $new}
+    if {$w eq $::qc::ed} {
+        applyFormatted $w $old $new
+    } elseif {[string trimright $new \n] ne [string trimright $old \n]} {
+        $w replace 1.0 end-1c $new
+    }
+    return ""
+}
+
+# Depois de salvar a aba ativa (ok = resultado de saveTo): dispara a
+# ferramenta externa de formatação, se a opção estiver ligada.
+proc qc::fmtAfterSave {ok} {
+    if {$ok && [lcfg fmtsave] eq "1" && [currentTool formatters] ne ""} {
+        formatCode 1
+    }
+    return $ok
 }
 
 proc qc::addRecent {path} {
@@ -4255,13 +4380,13 @@ proc qc::quit {} {
     foreach w $::qc::tabs {
         if {[$w edit modified]} {
             activateTab $w
-            if {![confirmDiscard]} return
+            if {![confirmDiscard]} {return}
         }
     }
     # abas reabertas na próxima vez
     set cfg(tabs) {}
     foreach w $::qc::tabs {
-        if {$TB($w,file) ne ""} { lappend cfg(tabs) $TB($w,file) }
+        if {$TB($w,file) ne ""} {lappend cfg(tabs) $TB($w,file)}
     }
     set cfg(tabcur) $TB($::qc::ed,file)
     stop
@@ -4281,7 +4406,7 @@ proc qc::conAppend {text tag} {
     $con insert end $text $tag
     # limita o tamanho do console
     set lines [lindex [split [$con index end] .] 0]
-    if {$lines > 50000} { $con delete 1.0 [expr {$lines - 40000}].0 }
+    if {$lines > 50000} {$con delete 1.0 [expr {$lines - 40000}].0}
     $con configure -state disabled
     $con see end
 }
@@ -4295,7 +4420,7 @@ proc qc::clearConsole {} {
 
 proc qc::setRunning {on} {
     # terminal no lugar da saída: volta para a saída ao executar
-    if {$on && $::qc::cfg(terminal) && $::qc::cfg(termpos) eq "replace"} { showTerminal 0 }
+    if {$on && $::qc::cfg(terminal) && $::qc::cfg(termpos) eq "replace"} {showTerminal 0}
     set s [expr {$on ? "disabled" : "!disabled"}]
     set ns [expr {$on ? "!disabled" : "disabled"}]
     .tb.run state $s
@@ -4303,6 +4428,35 @@ proc qc::setRunning {on} {
     .mb.script entryconfigure 0 -state [expr {$on ? "disabled" : "normal"}]
     .mb.script entryconfigure 1 -state [expr {$on ? "disabled" : "normal"}]
     .mb.script entryconfigure 2 -state [expr {$on ? "normal" : "disabled"}]
+}
+
+# Nome do arquivo temporário (o do arquivo atual ou script.<ext>) e código
+# a executar, com o hook prepare da linguagem. Retorna dict name code mode.
+proc qc::prepareCode {code selOnly} {
+    variable file
+    set exts [lget ext]
+    set ext [string tolower [file extension $file]]
+    set name [expr {$file ne "" && $ext in $exts ? [file tail $file] : "script[lindex $exts 0]"}]
+    set mode ""
+    set h [hook prepare]
+    if {$h ne ""} {
+        set p [$h $code $selOnly $file $name]
+        if {[dict exists $p name]} {set name [dict get $p name]}
+        if {[dict exists $p code]} {set code [dict get $p code]}
+        if {[dict exists $p mode]} {set mode [dict get $p mode]}
+    }
+    return [dict create name $name code $code mode $mode]
+}
+
+# errPatterns (%F = arquivo) -> lista regex nº-de-grupos para o linkify.
+proc qc::errPats {patterns name} {
+    set pats {}
+    set fre "(?:\[^\\s:(\"'\]*\[/\\\\\])?[reQuote $name]"
+    foreach p $patterns {
+        set p [string map [list %F $fre] $p]
+        if {![catch {regexp -about $p} ab]} {lappend pats $p [lindex $ab 0]}
+    }
+    return $pats
 }
 
 proc qc::run {selOnly} {
@@ -4326,7 +4480,7 @@ proc qc::run {selOnly} {
     } else {
         set code [$ed get 1.0 end-1c]
     }
-    if {$cfg(autoclear)} { clearConsole }
+    if {$cfg(autoclear)} {clearConsole}
     set rn [currentRunner]
     if {$rn eq ""} {
         conAppend "[lget name]: nenhum interpretador definido.\n" stderr
@@ -4334,28 +4488,22 @@ proc qc::run {selOnly} {
     }
     set exe [findExe $rn]
     if {$exe eq ""} {
-        conAppend "[runnerLabel $rn] não encontrado (procurados: [runnerSearched $rn]).\nIndique o executável em Executar > Opções de execução (Ctrl+E).\n" stderr
+        conAppend "[runnerLabel $rn] não encontrado (procurados: [runnerSearched $rn]).\n" stderr
+        conAppend "Indique o executável em Executar > Opções de execução (Ctrl+E).\n" stderr
         return
     }
     ::qc::_edw tag remove errline 1.0 end
+    ::qc::_edw tag remove warnline 1.0 end
 
-    # nome do arquivo temporário: o do arquivo atual ou script.<ext>
-    set exts [lget ext]
-    set ext [string tolower [file extension $file]]
-    set name [expr {$file ne "" && $ext in $exts ? [file tail $file] : "script[lindex $exts 0]"}]
-    set mode ""
-    set h [hook prepare]
-    if {$h ne ""} {
-        set p [$h $code $selOnly $file $name]
-        if {[dict exists $p name]} { set name [dict get $p name] }
-        if {[dict exists $p code]} { set code [dict get $p code] }
-        if {[dict exists $p mode]} { set mode [dict get $p mode] }
-    }
+    set p [prepareCode $code $selOnly]
+    set name [dict get $p name]
+    set code [dict get $p code]
+    set mode [dict get $p mode]
     set disp [expr {$file eq "" ? $name : [file tail $file]}]
 
     set dir [tmpDir]
     set script [file join $dir $name]
-    if {$code ne "" && [string index $code end] ne "\n"} { append code \n }
+    if {$code ne "" && [string index $code end] ne "\n"} {append code \n}
     writeFile $script $code
     set wrapper ""
     if {[dict exists $rn wrapper]} {
@@ -4370,12 +4518,12 @@ proc qc::run {selOnly} {
     set cmd $exe
     foreach a [dict get $rn args] {
         switch -- $a {
-            %F   { lappend cmd $script }
-            %W   { lappend cmd $wrapper }
-            %O   { lappend cmd {*}$opts }
-            %A   { lappend cmd {*}$pargs }
-            %--A { if {[llength $pargs]} { lappend cmd -- {*}$pargs } }
-            default { lappend cmd $a }
+            %F {lappend cmd $script}
+            %W {lappend cmd $wrapper}
+            %O {lappend cmd {*}$opts}
+            %A {lappend cmd {*}$pargs}
+            %--A {if {[llength $pargs]} {lappend cmd -- {*}$pargs}}
+            default {lappend cmd $a}
         }
     }
 
@@ -4397,12 +4545,7 @@ proc qc::run {selOnly} {
     }
     # parâmetros de saída da linguagem/runner (o runner pode sobrepor)
     set d [dict merge [ldict] $rn]
-    set pats {}
-    set fre "(?:\[^\\s:(\"'\]*\[/\\\\\])?[reQuote $name]"
-    foreach p [dict get $d errPatterns] {
-        set p [string map [list %F $fre] $p]
-        if {![catch {regexp -about $p} ab]} { lappend pats $p [lindex $ab 0] }
-    }
+    set pats [errPats [dict get $d errPatterns] $name]
     set nlines [llength [split [string trimright $code \n] \n]]
     array set R [list fd $fd er $er open 2 t0 [clock milliseconds] lang $lang \
         lineoff $lineoff script $script name $name disp $disp nlines $nlines \
@@ -4410,12 +4553,12 @@ proc qc::run {selOnly} {
         warnRe [dict get $d warnRe] grayInfo [dict get $d grayInfo] \
         killed 0 jumped 0 pend "" sgr {} pid [lindex [pid $fd] 0] proj "" \
         ed $ed]
-    fileevent $fd readable [list qc::onStdout $fd]
-    fileevent $er readable [list qc::onStderr $er]
+    chan event $fd readable [list qc::onStdout $fd]
+    chan event $er readable [list qc::onStderr $er]
 
     set what [expr {$selOnly ? "seleção de $disp (a partir da linha [expr {$lineoff + 1}])" : $disp}]
     set info [list $what [runnerLabel $rn]]
-    if {$mode ne ""} { lappend info $mode }
+    if {$mode ne ""} {lappend info $mode}
     lappend info [clock format [clock seconds] -format %H:%M:%S]
     conAppend "▶ [join $info {  ·  }]\n" info
     setRunning 1
@@ -4426,10 +4569,10 @@ proc qc::onStdout {fd} {
     set data [read $fd]
     if {$data ne ""} {
         conAnsi $data stdout
-        if {$::qc::R(proj) ne ""} { projScan }
+        if {$::qc::R(proj) ne ""} {projScan}
     }
     if {[eof $fd]} {
-        fileevent $fd readable {}
+        chan event $fd readable {}
         streamClosed
     }
 }
@@ -4450,9 +4593,9 @@ proc qc::conAnsi {data base} {
             conAppend [string range $data $pos [lindex $m 0]-1] [list $base {*}$R(sgr)]
         }
         set pos [expr {[lindex $m 1] + 1}]
-        if {[string range $data {*}$f] ne "m"} continue
+        if {[string range $data {*}$f] ne "m"} {continue}
         foreach c [split [string range $data {*}$p] ";"] {
-            if {$c ne "" && ![string is integer -strict $c]} continue
+            if {$c ne "" && ![string is integer -strict $c]} {continue}
             if {$c eq "" || $c == 0} {
                 set R(sgr) {}
             } elseif {$c == 1} {
@@ -4461,7 +4604,7 @@ proc qc::conAnsi {data base} {
                 set R(sgr) [lsearch -all -inline -not -exact $R(sgr) ansiB]
             } elseif {($c >= 30 && $c <= 37) || ($c >= 90 && $c <= 97) || $c == 39} {
                 set R(sgr) [lsearch -all -inline -not -glob $R(sgr) {ansi[0-9]*}]
-                if {$c != 39} { lappend R(sgr) ansi$c }
+                if {$c != 39} {lappend R(sgr) ansi$c}
             }
         }
     }
@@ -4480,7 +4623,7 @@ proc qc::onStderr {er} {
         }
     }
     if {[eof $er]} {
-        fileevent $er readable {}
+        chan event $er readable {}
         streamClosed
     }
 }
@@ -4493,13 +4636,13 @@ proc qc::errLine {raw} {
     if {$h ne ""} {
         set res [$h $raw]
         if {$res ne "-"} {
-            foreach {tag text} $res { linkify $text $tag }
+            foreach {tag text} $res {linkify $text $tag}
             return
         }
     }
     # barras de progresso: fica só com o último trecho após \r
     set k [string last \r $raw]
-    if {$k >= 0} { set raw [string range $raw $k+1 end] }
+    if {$k >= 0} {set raw [string range $raw $k+1 end]}
     set gray [string match "*\x1b\\\[90m*" $raw]
     set line [string map [list [tmpDir]/ ""] [stripAnsi $raw]]
     if {$R(warnRe) ne "" && [regexp -- $R(warnRe) $line]} {
@@ -4514,8 +4657,10 @@ proc qc::errLine {raw} {
 
 # Troca referências ao arquivo temporário (padrões errPatterns da linguagem)
 # por links clicáveis para a linha correspondente no editor.
-proc qc::linkify {line tag} {
-    variable R
+# ctx: array com o estado (o da execução, ou o da verificação/formatação).
+# Retorna o número de referências encontradas.
+proc qc::linkify {line tag {ctx ::qc::R}} {
+    upvar #0 $ctx R
     variable con
     variable linkSeq
     set hits {}
@@ -4526,23 +4671,24 @@ proc qc::linkify {line tag} {
             set whole [lindex $m $i]
             set lg [expr {$ng >= 1 ? [lindex $m $i+1] : {-1 -1}}]
             set cg [expr {$ng >= 2 ? [lindex $m $i+2] : {-1 -1}}]
-            if {[lindex $lg 0] >= 0} { lappend hits [list {*}$whole {*}$lg {*}$cg] }
+            if {[lindex $lg 0] >= 0} {lappend hits [list {*}$whole {*}$lg {*}$cg]}
         }
     }
     set pos 0
+    set nlinks 0
     foreach h [lsort -integer -index 0 $hits] {
         lassign $h ms me ls le cs ce
-        if {$ms < $pos} continue
+        if {$ms < $pos} {continue}
         set n [string range $line $ls $le]
         # linhas além do fim são de código gerado pelo interpretador/wrapper
         # (a linha seguinte à última é aceita: "fim inesperado do arquivo")
-        if {$n < 1 || $n > $R(nlines) + 1} continue
+        if {$n < 1 || $n > $R(nlines) + 1} {continue}
         set target [expr {min($n, max($R(nlines), 1)) + $R(lineoff)}]
         set col 0
         if {$cs >= 0} {
             set col [string range $line $cs $ce]
-            if {!$R(col0)} { incr col -1 }
-            if {$col < 0} { set col 0 }
+            if {!$R(col0)} {incr col -1}
+            if {$col < 0} {set col 0}
         }
         # troca o caminho do temporário pelo nome exibido e a linha pela real
         set segs [list [list $ls $le $target]]
@@ -4550,7 +4696,7 @@ proc qc::linkify {line tag} {
         if {$k >= 0} {
             set ps [expr {$ms + $k}]
             set pe [expr {$ps + [string length $R(name)] - 1}]
-            while {$ps > $ms && [string index $line $ps-1] ni {" " "\t" : ( \" '}} { incr ps -1 }
+            while {$ps > $ms && [string index $line $ps-1] ni {" " "\t" : ( \" '}} {incr ps -1}
             lappend segs [list $ps $pe $R(disp)]
         }
         set txt ""
@@ -4563,9 +4709,13 @@ proc qc::linkify {line tag} {
         append txt [string range $line $p $me]
         conAppend [string range $line $pos $ms-1] $tag
         set lt link[incr linkSeq]
+        incr nlinks
         conAppend $txt [list $tag link $lt]
         $con tag bind $lt <1> [list qc::gotoTabLine $R(ed) $target $col]
         set pos [expr {$me + 1}]
+        if {$tag eq "warn" && [winfo exists $R(ed)]} {
+            $R(ed) tag add warnline $target.0 "$target.0 lineend +1c"
+        }
         if {$tag eq "stderr" && [winfo exists $R(ed)]} {
             $R(ed) tag add errline $target.0 "$target.0 lineend +1c"
             if {!$R(jumped)} {
@@ -4575,25 +4725,26 @@ proc qc::linkify {line tag} {
         }
     }
     conAppend [string range $line $pos end]\n $tag
+    return $nlinks
 }
 
 proc qc::streamClosed {} {
     variable R
-    if {[incr R(open) -1] > 0} return
+    if {[incr R(open) -1] > 0} {return}
     set fd $R(fd)
     fconfigure $fd -blocking 1
     set code 0
     if {[catch {close $fd} msg opts]} {
         set ec [dict get $opts -errorcode]
         switch -- [lindex $ec 0] {
-            CHILDSTATUS { set code [lindex $ec 2] }
-            CHILDKILLED { set code [lindex $ec 2] }
-            default     { set code "?" }
+            CHILDSTATUS {set code [lindex $ec 2]}
+            CHILDKILLED {set code [lindex $ec 2]}
+            default {set code "?"}
         }
     }
     catch {close $R(er)}
     if {$R(proj) ne ""} {
-        if {[$::qc::con get end-2c] ne "\n"} { conAppend \n stdout }
+        if {[$::qc::con get end-2c] ne "\n"} {conAppend \n stdout}
         projScan
     }
     set secs [expr {([clock milliseconds] - $R(t0)) / 1000.0}]
@@ -4613,14 +4764,14 @@ proc qc::streamClosed {} {
 proc qc::descendants {pid} {
     set out {}
     if {![catch {exec pgrep -P $pid} kids]} {
-        foreach k $kids { lappend out $k {*}[descendants $k] }
+        foreach k $kids {lappend out $k {*}[descendants $k]}
     }
     return $out
 }
 
 proc qc::stop {} {
     variable R
-    if {![info exists R(pid)]} return
+    if {![info exists R(pid)]} {return}
     set R(killed) 1
     if {$::tcl_platform(platform) eq "windows"} {
         catch {exec {*}[auto_execok taskkill] /F /T /PID $R(pid)}
@@ -4629,11 +4780,494 @@ proc qc::stop {} {
     set all [linsert [descendants $R(pid)] 0 $R(pid)]
     catch {exec kill {*}$all}
     # processos que demoram a sair (ex.: JVM): força após 3 s
+    # tclint-disable-next-line command-args
     after 3000 [list apply {{all t0} {
         if {[info exists ::qc::R(t0)] && $::qc::R(t0) == $t0} {
             catch {exec kill -9 {*}$all}
         }
     }} $all $R(t0)]
+}
+
+# ---------------------------------------------------------------------------
+# Verificação (linter) e formatação
+# ---------------------------------------------------------------------------
+# Chaves "linters" e "formatters" da linguagem: listas de dicionários
+#   name label exe args       como nos runners; nos args: %F arquivo,
+#                             %C opção de configuração, %O opções do runner,
+#                             %S script auxiliar, %D pasta temporária,
+#                             %R pasta do arquivo, %N caminho do arquivo
+#                             original (ou <pasta>/<nome> se não salvo)
+#   runner                    só vale com esse runner (ex.: guile, chez)
+#   useRunner 1               usa o executável do runner corrente
+#   nearRunner 1              procura exe primeiro na pasta do executável
+#                             do runner (ex.: switch do opam), depois no PATH
+#   script scriptExt          script auxiliar gravado na pasta temporária
+#   config configArg          arquivos de configuração procurados da pasta
+#                             do arquivo para cima; configArg com %P = caminho
+#   noConfigArg               %C quando nenhum desses arquivos existe
+#   optsKeep                  só estas opções do runner vão para %O
+#                             (opção -> nº de valores)
+#   output stdout|inplace     (formatador) resultado na saída ou no arquivo
+#   errPatterns col0          como na linguagem (padrão: os dela)
+#   warnRe errRe infoRe       classificação das linhas (aviso/erro/info);
+#   tag                       linhas não classificadas: herdam a anterior,
+#                             começando por "tag" (padrão stderr)
+#   groupRe                   linha que inicia uma mensagem: todas as linhas
+#                             dela recebem a classificação achada nela
+#                             (quando o "Warning"/"Error" vem depois do local)
+#   ignoreRe                  linhas descartadas
+# Sem formatador externo, o hook "reformat" da linguagem (texto -> texto).
+
+# Ferramenta corrente do tipo kind (linters/formatters): a primeira instalada
+# ou, se nenhuma estiver, a primeira; "" se não houver.
+proc qc::currentTool {kind} {
+    set rn [currentRunner]
+    set rname [expr {$rn eq "" ? "" : [dict get $rn name]}]
+    set first ""
+    foreach t [lget $kind] {
+        if {[dict exists $t runner] && [dict get $t runner] ne $rname} {continue}
+        if {[toolExe $t] ne ""} {return $t}
+        if {$first eq ""} {set first $t}
+    }
+    return $first
+}
+
+proc qc::toolGet {t key {def ""}} {
+    return [expr {[dict exists $t $key] ? [dict get $t $key] : $def}]
+}
+
+# Executável: opção exe.<nome> da configuração, o do runner (useRunner) ou
+# busca no PATH.
+proc qc::toolExe {t} {
+    set user [lcfg exe.[dict get $t name]]
+    if {$user ne ""} {return [list $user]}
+    if {[toolGet $t useRunner 0]} {
+        set rn [currentRunner]
+        return [expr {$rn eq "" ? "" : [findExe $rn]}]
+    }
+    if {[toolGet $t nearRunner 0]} {
+        set rn [currentRunner]
+        set rexe [expr {$rn eq "" ? "" : [lindex [findExe $rn] 0]}]
+        if {$rexe ne "" && [file pathtype $rexe] ne "relative"} {
+            set dir [file dirname $rexe]
+            foreach n [toolGet $t exe] {
+                foreach c [list [file join $dir $n] [file join $dir $n.exe]] {
+                    if {[file isfile $c] && [file executable $c]} {return [list $c]}
+                }
+            }
+        }
+    }
+    foreach n [toolGet $t exe] {
+        set p [auto_execok $n]
+        if {$p ne ""} {return $p}
+    }
+    return ""
+}
+
+proc qc::toolMissing {t} {
+    if {[toolGet $t useRunner 0]} {
+        set rn [currentRunner]
+        set what [expr {$rn eq "" ? "" : " (procurados: [runnerSearched $rn])"}]
+    } else {
+        set what " (procurados: [join [toolGet $t exe] {, }])"
+    }
+    conAppend "[runnerLabel $t] não encontrado$what.\n" stderr
+    set ::qc::status "[runnerLabel $t] não encontrado"
+}
+
+# Primeiro dos arquivos names achado de dir para cima, ou "".
+proc qc::findUp {dir names} {
+    set dir [file normalize $dir]
+    while 1 {
+        foreach n $names {
+            set p [file join $dir $n]
+            if {[file isfile $p]} {return $p}
+        }
+        set up [file dirname $dir]
+        if {$up eq $dir} {return ""}
+        set dir $up
+    }
+}
+
+# Linha de comando da ferramenta para o arquivo path (wd = pasta do original).
+proc qc::toolCmd {t exe path wd} {
+    set dir [file dirname $path]
+    set orig [expr {$::qc::file ne "" ? $::qc::file : [file join $wd [file tail $path]]}]
+    set map [list %D $dir %R $wd %N $orig]
+    set conf [findUp $wd [toolGet $t config]]
+    if {$conf ne ""} {
+        set cargs [lmap a [toolGet $t configArg] {string map [list %P $conf {*}$map] $a}]
+    } else {
+        set cargs [lmap a [toolGet $t noConfigArg] {string map $map $a}]
+    }
+    set script ""
+    if {[dict exists $t script]} {
+        set script [file join $dir qconsole-[dict get $t name][toolGet $t scriptExt]]
+        writeFile $script [dict get $t script]
+    }
+    set opts [splitArgs [lcfg opts]]
+    if {[dict exists $t optsKeep]} {
+        set keep [dict get $t optsKeep]
+        set o {}
+        for {set i 0} {$i < [llength $opts]} {incr i} {
+            set a [lindex $opts $i]
+            if {[dict exists $keep $a]} {
+                set n [dict get $keep $a]
+                lappend o {*}[lrange $opts $i [expr {$i + $n}]]
+                incr i $n
+            }
+        }
+        set opts $o
+    }
+    set cmd $exe
+    foreach a [dict get $t args] {
+        switch -- $a {
+            %F {lappend cmd $path}
+            %C {lappend cmd {*}$cargs}
+            %O {lappend cmd {*}$opts}
+            %S {lappend cmd $script}
+            default {lappend cmd [string map $map $a]}
+        }
+    }
+    return $cmd
+}
+
+# Grava o texto do editor em <tmp>/<sub>/<nome> e prepara o array ctx (o
+# estado usado pelo linkify). Retorna o caminho gravado.
+proc qc::toolSetup {ctx sub t code} {
+    upvar #0 $ctx X
+    variable file
+    variable ed
+    set name [dict get [prepareCode $code 0] name]
+    set dir [file join [tmpDir] $sub]
+    file mkdir $dir
+    set path [file join $dir $name]
+    if {$code ne "" && [string index $code end] ne "\n"} {append code \n}
+    writeFile $path $code
+    set pats [errPats [toolGet $t errPatterns [lget errPatterns]] $name]
+    array unset X
+    array set X [list ed $ed tool $t name $name dir $dir code $code lineoff 0 \
+        disp [expr {$file eq "" ? $name : [file tail $file]}] \
+        nlines [llength [split [string trimright $code \n] \n]] \
+        pats $pats col0 [toolGet $t col0 [lget col0]] jumped 0 \
+        t0 [clock milliseconds]]
+    return $path
+}
+
+# Executa cmd em segundo plano (stdout e stderr separados) e, ao terminar,
+# chama {*}$done código stdout stderr.
+proc qc::toolExec {cmd wd done} {
+    variable TX
+    lassign [chan pipe] er ew
+    set old [pwd]
+    catch {cd $wd}
+    set rc [catch {open |[list {*}$cmd 2>@ $ew] r+} fd]
+    cd $old
+    close $ew
+    if {$rc} {
+        close $er
+        {*}$done -1 "" $fd
+        return
+    }
+    catch {chan close $fd write}
+    foreach c [list $fd $er] {
+        fconfigure $c -blocking 0 -translation auto
+        setEncoding $c
+    }
+    set id [incr ::qc::toolSeq]
+    set TX($id) [dict create out "" err "" open 2 fd $fd er $er done $done]
+    chan event $fd readable [list qc::toolRead $id $fd out]
+    chan event $er readable [list qc::toolRead $id $er err]
+}
+
+proc qc::toolRead {id ch key} {
+    variable TX
+    dict append TX($id) $key [read $ch]
+    if {![eof $ch]} {return}
+    chan event $ch readable {}
+    dict incr TX($id) open -1
+    if {[dict get $TX($id) open] > 0} {return}
+    set t $TX($id)
+    unset TX($id)
+    set fd [dict get $t fd]
+    fconfigure $fd -blocking 1
+    set code 0
+    if {[catch {close $fd} msg opts]} {
+        set ec [dict get $opts -errorcode]
+        set code [expr {[lindex $ec 0] in {CHILDSTATUS CHILDKILLED} ? [lindex $ec 2] : "?"}]
+    }
+    catch {close [dict get $t er]}
+    {*}[dict get $t done] $code [dict get $t out] [dict get $t err]
+}
+
+# Saída da ferramenta no console, com links para as linhas citadas.
+# Retorna o número de referências (problemas) encontradas.
+proc qc::toolOutput {ctx out err} {
+    upvar #0 $ctx X
+    set t $X(tool)
+    set warnRe [toolGet $t warnRe]
+    set errRe [toolGet $t errRe]
+    set infoRe [toolGet $t infoRe]
+    set ignoreRe [toolGet $t ignoreRe]
+    set groupRe [toolGet $t groupRe]
+    set cur [toolGet $t tag stderr]
+    set n 0
+    set lines {}
+    foreach raw [concat [split [string trimright $out] \n] [split [string trimright $err] \n]] {
+        set k [string last \r $raw]
+        if {$k >= 0} {set raw [string range $raw $k+1 end]}
+        set line [string map [list $X(dir)/ "" [tmpDir]/ ""] [stripAnsi $raw]]
+        if {[string trim $line] eq ""} {continue}
+        if {$ignoreRe ne "" && [regexp -- $ignoreRe $line]} {continue}
+        lappend lines $line
+    }
+    if {$groupRe ne ""} {
+        # mensagens em grupos: a classificação vale para o grupo inteiro
+        set groups {}
+        foreach line $lines {
+            if {![llength $groups] || [regexp -- $groupRe $line]} {
+                lappend groups [list $line]
+            } else {
+                lset groups end [list {*}[lindex $groups end] $line]
+            }
+        }
+        foreach g $groups {
+            set tag [toolGet $t tag stderr]
+            foreach line $g {
+                if {$warnRe ne "" && [regexp -- $warnRe $line]} {
+                    set tag warn
+                    break
+                }
+                if {$errRe ne "" && [regexp -- $errRe $line]} {
+                    set tag stderr
+                    break
+                }
+            }
+            foreach line $g {incr n [linkify $line $tag $ctx]}
+        }
+        return $n
+    }
+    foreach line $lines {
+        if {$warnRe ne "" && [regexp -- $warnRe $line]} {
+            set tag [set cur warn]
+        } elseif {$errRe ne "" && [regexp -- $errRe $line]} {
+            set tag [set cur stderr]
+        } elseif {$infoRe ne "" && [regexp -- $infoRe $line]} {
+            set tag info
+        } else {
+            set tag $cur
+        }
+        incr n [linkify $line $tag $ctx]
+    }
+    return $n
+}
+
+proc qc::toolHeader {verb ctx} {
+    upvar #0 $ctx X
+    if {$::qc::cfg(autoclear) && ![info exists ::qc::R(fd)]} {clearConsole}
+    set when [clock format [clock seconds] -format %H:%M:%S]
+    conAppend "▶ $verb $X(disp)  ·  [runnerLabel $X(tool)]  ·  $when\n" info
+}
+
+proc qc::toolSecs {ctx} {
+    upvar #0 $ctx X
+    return [format %.3f [expr {([clock milliseconds] - $X(t0)) / 1000.0}]]
+}
+
+# --- verificação (linter) ---------------------------------------------------
+
+proc qc::lint {} {
+    variable ed
+    variable LT
+    variable file
+    if {[info exists LT(ed)]} {
+        set ::qc::status "Já existe uma verificação em andamento"
+        return
+    }
+    set t [currentTool linters]
+    if {$t eq ""} {
+        set ::qc::status "[lget name]: nenhum verificador (linter) disponível"
+        return
+    }
+    set exe [toolExe $t]
+    if {$exe eq ""} {toolMissing $t; return}
+    set path [toolSetup ::qc::LT lint $t [$ed get 1.0 end-1c]]
+    set wd [expr {$file eq "" ? [pwd] : [file dirname $file]}]
+    foreach tg {errline warnline} {$ed tag remove $tg 1.0 end}
+    toolHeader Verificando ::qc::LT
+    set ::qc::status "Verificando…"
+    toolExec [toolCmd $t $exe $path $wd] $wd qc::lintDone
+}
+
+proc qc::lintDone {code out err} {
+    variable LT
+    set n [toolOutput ::qc::LT $out $err]
+    set secs [toolSecs ::qc::LT]
+    if {$n > 0} {
+        set msg "$n problema(s) encontrado(s)"
+        conAppend "■ $msg em $secs s\n" warn
+    } elseif {$code eq "0"} {
+        set msg "Nenhum problema encontrado"
+        conAppend "■ $msg ($secs s)\n" info
+    } else {
+        set msg "[runnerLabel $LT(tool)] terminou com código de saída $code"
+        conAppend "■ $msg\n" stderr
+    }
+    set ::qc::status $msg
+    array unset LT
+}
+
+# --- formatação -------------------------------------------------------------
+
+# onSave: chamado por "Formatar ao salvar" (sem mensagens na saída; salva de
+# novo ao terminar).
+proc qc::formatCode {{onSave 0}} {
+    variable ed
+    variable FT
+    variable file
+    if {[info exists FT(ed)]} {
+        if {!$onSave} {set ::qc::status "Já existe uma formatação em andamento"}
+        return
+    }
+    set code [$ed get 1.0 end-1c]
+    set t [currentTool formatters]
+    if {$t eq ""} {
+        set h [hook reformat]
+        if {$h eq ""} {
+            set ::qc::status "[lget name]: nenhum formatador disponível"
+            return
+        }
+        if {[catch {$h $code} new]} {
+            set ::qc::status "Erro ao formatar: $new"
+            return
+        }
+        applyFormatted $ed $code $new
+        return
+    }
+    set exe [toolExe $t]
+    if {$exe eq ""} {
+        if {$onSave} {
+            append ::qc::status "  ([runnerLabel $t] não encontrado: não formatado)"
+        } else {
+            toolMissing $t
+        }
+        return
+    }
+    set path [toolSetup ::qc::FT fmt $t $code]
+    set FT(orig) $code
+    set FT(path) $path
+    set FT(save) $onSave
+    set wd [expr {$file eq "" ? [pwd] : [file dirname $file]}]
+    set ::qc::status "Formatando com [runnerLabel $t]…"
+    toolExec [toolCmd $t $exe $path $wd] $wd qc::formatDone
+}
+
+proc qc::formatDone {code out err} {
+    variable FT
+    set ed $FT(ed)
+    set orig $FT(orig)
+    if {$FT(save)} {
+        formatSaveDone $code $out
+        array unset FT
+        return
+    }
+    if {$code ne "0"} {
+        toolHeader Formatando ::qc::FT
+        toolOutput ::qc::FT $out $err
+        conAppend "■ [runnerLabel $FT(tool)] terminou com código de saída $code\n" stderr
+        set ::qc::status "Erro ao formatar (veja a saída)"
+    } elseif {![winfo exists $ed] || $ed ne $::qc::ed} {
+        set ::qc::status "Formatação descartada: a aba mudou"
+    } elseif {[$ed get 1.0 end-1c] ne $orig} {
+        set ::qc::status "Formatação descartada: o texto mudou durante a formatação"
+    } else {
+        set new [expr {[toolGet $FT(tool) output stdout] eq "stdout" ? $out : [readFile $FT(path)]}]
+        applyFormatted $ed $orig $new
+    }
+    array unset FT
+}
+
+# Fim da formatação disparada por "Formatar ao salvar": aplica e salva de
+# novo, só se a aba e o texto ainda forem os mesmos.
+proc qc::formatSaveDone {code out} {
+    variable FT
+    set ed $FT(ed)
+    set f [expr {[winfo exists $ed] ? $::qc::TB($ed,file) : ""}]
+    if {$code ne "0"} {
+        set ::qc::status "Salvo: $f  (não formatado: [runnerLabel $FT(tool)]\
+            terminou com código $code; Ctrl+Shift+F mostra os erros)"
+        return
+    }
+    if {$ed ne $::qc::ed || [$ed get 1.0 end-1c] ne $FT(orig) || $f eq ""} return
+    set new [expr {[toolGet $FT(tool) output stdout] eq "stdout" ? $out : [readFile $FT(path)]}]
+    applyFormatted $ed $FT(orig) $new
+    if {[$ed edit modified]} {
+        saveTo $f
+        set ::qc::status "Salvo e formatado: $f"
+    } else {
+        set ::qc::status "Salvo: $f"
+    }
+}
+
+# Troca o texto old pelo formatado new mexendo só no que mudou (um passo de
+# desfazer) e mantém o cursor na mesma linha.
+proc qc::applyFormatted {ed old new} {
+    if {[string index $old end] eq "\n"} {
+        set new [string trimright $new \n]\n
+    } else {
+        set new [string trimright $new \n]
+    }
+    if {$new eq $old} {
+        set ::qc::status "O código já está formatado"
+        return
+    }
+    multiClear
+    set ol [split $old \n]
+    set nl [split $new \n]
+    lassign [split [$ed index insert] .] cl cc
+    atomic {
+        if {[llength $ol] == [llength $nl]} {
+            # mesmas linhas (só indentação/espaços): troca linha a linha
+            set i 0
+            foreach a $ol b $nl {
+                incr i
+                if {$a eq $b} {continue}
+                $ed replace $i.0 "$i.0 lineend" $b
+                if {$i == $cl} {
+                    regexp {^[ \t]*} $a ia
+                    regexp {^[ \t]*} $b ib
+                    set ia [string length $ia]
+                    set ib [string length $ib]
+                    set cc [expr {$cc <= $ia ? min($cc, $ib) : max($ib, $cc + $ib - $ia)}]
+                }
+            }
+        } else {
+            # troca só o trecho entre as linhas iguais do início e do fim
+            set no [llength $ol]
+            set nn [llength $nl]
+            set lim [expr {min($no, $nn) - 1}]
+            set p 0
+            while {$p < $lim && [lindex $ol $p] eq [lindex $nl $p]} {incr p}
+            set s 0
+            while {$p + $s < $lim && [lindex $ol end-$s] eq [lindex $nl end-$s]} {incr s}
+            set pre [string length [join [lrange $ol 0 $p-1] \n]]
+            if {$p > 0} {incr pre}
+            set suf 0
+            if {$s > 0} {
+                set suf [expr {[string length [join [lrange $ol end-[expr {$s - 1}] end] \n]] + 1}]
+            }
+            set mid [string range $new $pre end-$suf]
+            $ed replace "1.0 + $pre chars" "1.0 + [expr {[string length $old] - $suf}] chars" $mid
+            if {$cl > $no - $s} {
+                incr cl [expr {$nn - $no}]
+            } elseif {$cl > $p} {
+                set cl [expr {min($cl, $nn - $s)}]
+            }
+        }
+    }
+    $ed mark set insert $cl.$cc
+    $ed see insert
+    set ::qc::status "Código formatado"
 }
 
 # ---------------------------------------------------------------------------
@@ -4670,7 +5304,7 @@ proc qc::buildTerminal {} {
 # shell); por isso ele é recriado a cada novo terminal.
 proc qc::termContainer {} {
     set c .pw.term.c
-    if {[winfo exists $c]} { return $c }
+    if {[winfo exists $c]} {return $c}
     frame $c -container 1 -background $::qc::C(conbg) -bd 0 -highlightthickness 0
     grid $c -row 1 -column 0 -sticky nsew
     # o teclado vai para o terminal enquanto o ponteiro estiver sobre ele
@@ -4682,14 +5316,14 @@ proc qc::termContainer {} {
 
 proc qc::termHover {in detail} {
     variable T
-    if {$detail eq "NotifyInferior"} return
+    if {$detail eq "NotifyInferior"} {return}
     set c .pw.term.c
     if {$in} {
-        if {[focus] ne $c} { set T(prevfocus) [focus] }
+        if {[focus] ne $c} {set T(prevfocus) [focus]}
         focus $c
     } elseif {[focus] eq $c} {
         set p [expr {[info exists T(prevfocus)] ? $T(prevfocus) : ""}]
-        if {$p eq "" || ![winfo exists $p] || ![winfo ismapped $p]} { set p $::qc::ed }
+        if {$p eq "" || ![winfo exists $p] || ![winfo ismapped $p]} {set p $::qc::ed}
         focus $p
     }
 }
@@ -4706,14 +5340,14 @@ proc qc::toggleTerminal {} {
 
 proc qc::applyTerminal {} {
     variable cfg
-    if {$cfg(termpos) ni {side replace}} { set cfg(termpos) side }
+    if {$cfg(termpos) ni {side replace}} {set cfg(termpos) side}
     set want .pw.co
     if {$cfg(terminal)} {
         set want [expr {$cfg(termpos) eq "replace" ? ".pw.term" : ".pw.co .pw.term"}]
     }
     if {[.pw.bot panes] ne $want} {
-        foreach p [.pw.bot panes] { .pw.bot forget $p }
-        foreach p $want { .pw.bot add $p -weight 1 }
+        foreach p [.pw.bot panes] {.pw.bot forget $p}
+        foreach p $want {.pw.bot add $p -weight 1}
         if {[llength $want] > 1} {
             update idletasks
             catch {.pw.bot sashpos 0 [expr {[winfo width .pw] / 2}]}
@@ -4728,7 +5362,7 @@ proc qc::applyTerminal {} {
         pack forget .pw.co.head.t
     } else {
         pack .pw.co.head.t -side right -before .pw.co.head.l
-        if {[string match .pw.term* [focus]]} { focus $::qc::ed }
+        if {[string match .pw.term* [focus]]} {focus $::qc::ed}
     }
     if {$cfg(termpos) eq "replace"} {
         pack .pw.term.head.o -side right -after .pw.term.head.r
@@ -4740,8 +5374,8 @@ proc qc::applyTerminal {} {
 # Pasta inicial: a pasta aberta, a do arquivo atual ou a pasta pessoal.
 proc qc::termDir {} {
     variable cfg
-    if {$cfg(folder) ne "" && [file isdirectory $cfg(folder)]} { return $cfg(folder) }
-    if {$::qc::file ne ""} { return [file dirname [file normalize $::qc::file]] }
+    if {$cfg(folder) ne "" && [file isdirectory $cfg(folder)]} {return $cfg(folder)}
+    if {$::qc::file ne ""} {return [file dirname [file normalize $::qc::file]]}
     return [homeDir]
 }
 
@@ -4758,7 +5392,7 @@ proc qc::termDefaultCmd {wid} {
 proc qc::termStart {} {
     variable T
     variable cfg
-    if {[info exists T(chan)]} { return 1 }
+    if {[info exists T(chan)]} {return 1}
     if {[tk windowingsystem] ne "x11"} {
         set ::qc::status "O terminal embutido requer X11"
         return 0
@@ -4788,7 +5422,7 @@ proc qc::termStart {} {
         return 0
     }
     fconfigure $ch -blocking 0
-    fileevent $ch readable [list qc::termRead $ch]
+    chan event $ch readable [list qc::termRead $ch]
     set T(chan) $ch
     set T(pid) [pid $ch]
     return 1
@@ -4799,8 +5433,8 @@ proc qc::termStart {} {
 proc qc::termRead {ch} {
     variable T
     set d [read $ch]
-    if {[string trim $d] ne ""} { conAppend "terminal: $d" stderr }
-    if {![eof $ch]} return
+    if {[string trim $d] ne ""} {conAppend "terminal: $d" stderr}
+    if {![eof $ch]} {return}
     catch {close $ch}
     if {[info exists T(chan)] && $T(chan) eq $ch} {
         unset T(chan) T(pid)
@@ -4810,14 +5444,14 @@ proc qc::termRead {ch} {
 
 proc qc::termKill {} {
     variable T
-    if {![info exists T(chan)]} return
+    if {![info exists T(chan)]} {return}
     set ch $T(chan)
     set pids $T(pid)
     unset T(chan) T(pid)
-    fileevent $ch readable {}
+    chan event $ch readable {}
     catch {exec kill {*}$pids}
     catch {close $ch}
-    if {[string match .pw.term* [focus]]} { focus $::qc::ed }
+    if {[string match .pw.term* [focus]]} {focus $::qc::ed}
     catch {destroy .pw.term.c}
 }
 
@@ -4832,7 +5466,7 @@ proc qc::termRestart {} {
 
 proc qc::termDialog {} {
     set w .termcfg
-    if {[winfo exists $w]} { raise $w; focus $w.f.e; return }
+    if {[winfo exists $w]} {raise $w; focus $w.f.e; return}
     toplevel $w -background $::qc::C(ui)
     wm title $w "Comando do terminal"
     wm transient $w .
@@ -4861,9 +5495,9 @@ proc qc::termDialogApply {} {
     variable cfg
     set new [string trim $::qc::termTmp]
     destroy .termcfg
-    if {$new eq $cfg(termcmd)} return
+    if {$new eq $cfg(termcmd)} {return}
     set cfg(termcmd) $new
-    if {[info exists ::qc::T(chan)]} { termRestart }
+    if {[info exists ::qc::T(chan)]} {termRestart}
 }
 
 # ---------------------------------------------------------------------------
@@ -4902,7 +5536,10 @@ proc qc::showShortcuts {} {
         "Shift+Alt+↑ / ↓       Adicionar cursor acima / abaixo"
         "Esc                   Voltar a um cursor"
         "Ctrl+Shift+D          Duplicar linha"
+        "Ctrl+Shift+↑ / ↓      Mover linha para cima / baixo"
         "Ctrl+/                Comentar linhas"
+        "Ctrl+Shift+F          Formatar código"
+        "F8                    Verificar código (linter)"
         "Ctrl+Espaço           Completar palavra"
         "Tab / Shift+Tab       Indentar / Desindentar"
         "Ctrl+ + / - / 0       Tamanho da fonte"
@@ -4912,12 +5549,16 @@ proc qc::showShortcuts {} {
 proc qc::about {} {
     variable langs
     set ls {}
-    foreach id $langs { lappend ls [lget name $id] }
+    foreach id $langs {lappend ls [lget name $id]}
     set rn [currentRunner]
     set exe [expr {$rn eq "" ? "" : [join [findExe $rn]]}]
-    set extra [expr {[llength $::qc::loadErrors] ? "\n\nErros ao carregar linguagens:\n[join $::qc::loadErrors \n]" : ""}]
-    tk_messageBox -parent . -title "Sobre" -message "qconsole $::qc::version" \
-        -detail "Editor simples para avaliação rápida de código.\n\nLinguagens: [join $ls {, }]\nAtual: [lget name] · $::qc::interp\nComando: $exe\n\nTcl [info patchlevel] · Tk [package present Tk]$extra"
+    set detail "Editor simples para avaliação rápida de código.\n\n"
+    append detail "Linguagens: [join $ls {, }]\nAtual: [lget name] · $::qc::interp\nComando: $exe\n\n"
+    append detail "Tcl [info patchlevel] · Tk [package present Tk]"
+    if {[llength $::qc::loadErrors]} {
+        append detail "\n\nErros ao carregar linguagens:\n[join $::qc::loadErrors \n]"
+    }
+    tk_messageBox -parent . -title "Sobre" -message "qconsole $::qc::version" -detail $detail
 }
 
 # ===========================================================================
@@ -4953,6 +5594,16 @@ qc::language tcl {
          versionRe {([0-9]+\.[0-9]+[.0-9a-z]*)} optsHint "(opções do tclsh)"}
     }
     errPatterns {{\(file "%F" line ([0-9]+)\)}}
+    linters {
+        {name tclint label tclint exe {tclint} args {%C %F}
+         config {tclint.toml .tclint} configArg {-c %P}
+         errPatterns {{%F:([0-9]+):([0-9]+):}} tag warn errRe {syntax error}}
+    }
+    formatters {
+        {name tclfmt label tclfmt exe {tclfmt} args {%C %F} output stdout
+         config {tclint.toml .tclint} configArg {-c %P}
+         errPatterns {{%F:([0-9]+):([0-9]+):}}}
+    }
 }
 
 # Wrapper: executa o script, devolve o resultado e o errorInfo por um
@@ -5008,18 +5659,18 @@ proc qc::lang::tcl::init {} {
 proc qc::lang::tcl::apiSources {} {
     set out {}
     set cands [list [info library]]
-    if {[info exists ::tk_library]} { lappend cands $::tk_library }
+    if {[info exists ::tk_library]} {lappend cands $::tk_library}
     lappend cands {*}$::auto_path
     foreach d $cands {
         set d [file normalize $d]
-        if {[file isdirectory $d] && $d ni $out} { lappend out $d }
+        if {[file isdirectory $d] && $d ni $out} {lappend out $d}
     }
     # pastas dentro de outras da lista seriam lidas duas vezes
     lmap d $out {
         foreach o $out {
-            if {$o ne $d && [string first $o/ $d] == 0} { set d ""; break }
+            if {$o ne $d && [string first $o/ $d] == 0} {set d ""; break}
         }
-        if {$d eq ""} continue
+        if {$d eq ""} {continue}
         set d
     }
 }
@@ -5029,37 +5680,39 @@ proc qc::lang::tcl::apiSources {} {
 # dentro de outra construção (descartado).
 proc qc::lang::tcl::defQual {lines L name} {
     set name [regsub {^::} $name {}]
-    if {[string first :: $name] >= 0} { return $name }
+    if {[string first :: $name] >= 0} {return $name}
     regexp {^[ \t]*} [lindex $lines $L] ind
     set n [string length $ind]
-    if {$n == 0} { return $name }
+    if {$n == 0} {return $name}
     for {set k [expr {$L - 1}]} {$k >= 0} {incr k -1} {
         set l [lindex $lines $k]
-        if {[regexp {^([ \t]*)namespace[ \t]+eval[ \t]+([^ \t\{]+)} $l -> i2 ns]
-            && [string length $i2] < $n} {
+        if {
+            [regexp {^([ \t]*)namespace[ \t]+eval[ \t]+([^ \t\{]+)} $l -> i2 ns]
+            && [string length $i2] < $n
+        } {
             set ns [regsub {^::} $ns {}]
             return [expr {$ns eq "" ? $name : "${ns}::$name"}]
         }
-        if {[regexp {^[^ \t#\}]} $l]} { return "" }
+        if {[regexp {^[^ \t#\}]} $l]} {return ""}
     }
     return ""
 }
 
 proc qc::lang::tcl::wordTag {word tag txt a} {
-    if {$tag eq ""} { return "" }
-    if {$word in {else elseif then finally on trap}} { return keyword }
+    if {$tag eq ""} {return ""}
+    if {$word in {else elseif then finally on trap}} {return keyword}
     set p [expr {$a - 1}]
-    while {$p >= 0 && [string index $txt $p] in {" " "\t"}} { incr p -1 }
-    if {$p >= 0 && [string index $txt $p] ni [list \n \; \[ \{]} { return "" }
+    while {$p >= 0 && [string index $txt $p] in {" " "\t"}} {incr p -1}
+    if {$p >= 0 && [string index $txt $p] ni [list \n \; \[ \{]} {return ""}
     return $tag
 }
 
 proc qc::lang::tcl::stderrLine {line} {
     switch -glob -- $line {
-        "\x01R*" { return [list result "Resultado: [string map {\x02 \n} [string range $line 2 end]]"] }
+        "\x01R*" {return [list result "Resultado: [string map {\x02 \n} [string range $line 2 end]]"]}
         "\x01E*" {
             set out {}
-            foreach l [split [string range $line 2 end] \x02] { lappend out stderr $l }
+            foreach l [split [string range $line 2 end] \x02] {lappend out stderr $l}
             return $out
         }
     }
@@ -5069,12 +5722,12 @@ proc qc::lang::tcl::stderrLine {line} {
 # tclsh da mesma instalação do wish, se houver.
 proc qc::lang::tcl::findExe {rn} {
     set exe [info nameofexecutable]
-    if {[string match -nocase tclsh* [file tail $exe]]} { return [list $exe] }
+    if {[string match -nocase tclsh* [file tail $exe]]} {return [list $exe]}
     set dir [file dirname $exe]
     set v [info tclversion]
     foreach n [list tclsh$v tclsh[string map {. ""} $v] tclsh] {
         foreach c [list [file join $dir $n] [file join $dir $n.exe]] {
-            if {[file isfile $c] && [file executable $c]} { return [list $c] }
+            if {[file isfile $c] && [file executable $c]} {return [list $c]}
         }
     }
     return ""
@@ -5123,6 +5776,16 @@ qc::language scala {
     infoRe   {^\[info\]}
     warnRe   {^\[warn\]}
     grayInfo 1
+    linters {
+        {name scala-compile label "scala compile" useRunner 1
+         args {compile %O -O -Wunused:imports,privates,locals -O -deprecation -O -feature %F}
+         warnRe {Warning|^\[warn\]} errRe {Error|^\[error\]}
+         infoRe {^(?:\[info\]|Compiling|Compiled|Compilation failed|Download|[0-9]+ (?:errors?|warnings?) found)}}
+    }
+    formatters {
+        {name scalafmt label scalafmt useRunner 1 args {fmt %C %F} output inplace
+         config {.scalafmt.conf} configArg {--scalafmt-conf %P}}
+    }
 }
 
 # "scala" (fonte com @main/main/App) ou "sc" (script com instruções soltas).
@@ -5148,7 +5811,7 @@ proc qc::lang::scala::prepare {code selOnly file name} {
         # o nome do script vira nome de objeto: precisa ser um identificador
         set base [expr {$file eq "" ? "script" : [file rootname [file tail $file]]}]
         set base [regsub -all {[^A-Za-z0-9_]} $base _]
-        if {![regexp {^[A-Za-z_]} $base]} { set base "s$base" }
+        if {![regexp {^[A-Za-z_]} $base]} {set base "s$base"}
         return [list name $base.sc mode script]
     }
     return [list name [expr {$ext eq ".scala" ? [file tail $file] : "Main.scala"}] mode "fonte .scala"]
@@ -5370,6 +6033,61 @@ qc::language scheme {
          optsHint "--libdirs ./lib   --optimize-level 2"
          errPatterns {{line ([0-9]+), char ([0-9]+) of %F}} col0 0}
     }
+    linters {
+        {name guild label "guild compile" runner guile exe {guild guild3.0}
+         args {compile -Wunused-variable -Wunbound-variable -Warity-mismatch
+               -Wmacro-use-before-definition -Wduplicate-case-datum
+               -Wbad-case-datum -Wformat %O -o %D/lint.go %F}
+         optsKeep {-L 1 -x 1 --r6rs 0 --r7rs 0}
+         errPatterns {{%F:([0-9]+):([0-9]+)}} col0 1 warnRe {warning:} errRe {.}
+         ignoreRe {^wrote `|^ice-9/boot-9\.scm:}}
+        {name chez-lint label "Chez Scheme (compile)" runner chez useRunner 1
+         args {-q %O --script %S %F} scriptExt .ss
+         errPatterns {{line ([0-9]+), char ([0-9]+) of %F}} col0 0
+         warnRe {^Warning} errRe {^Exception|^Error}
+         script {
+(let* ([file (cadr (command-line))]
+       [sfd (call-with-port (open-file-input-port file)
+              (lambda (p) (make-source-file-descriptor file p #t)))]
+       [ip (transcoded-port (open-file-input-port file) (native-transcoder))])
+  (define (strip x) (if (annotation? x) (annotation-stripped x) x))
+  (define (head x) (let ([s (strip x)]) (and (pair? s) (car s))))
+  (define (report c)
+    (display-condition c (current-error-port))
+    (newline (current-error-port)))
+  (define (unbound? c)
+    (and (message-condition? c)
+         (let ([m (condition-message c)])
+           (and (>= (string-length m) 23)
+                (string=? (substring m 0 23) "attempt to reference un")))))
+  ;; compila sem executar; avisos: show? -> mostra e continua; erros: err
+  (define (check forms show? err)
+    (call/cc
+      (lambda (k)
+        (with-exception-handler
+          (lambda (c)
+            (cond
+              [(warning? c) (when show? (report c))]
+              [else (err c) (k #f)]))
+          (lambda ()
+            (let-values ([(op get) (open-bytevector-output-port)])
+              (compile-to-port forms op)))))))
+  (define forms
+    (guard (c [#t (report c) (exit 1)])
+      (let loop ([acc '()] [bfp 0])
+        (let-values ([(x nbfp) (get-datum/annotations ip sfd bfp)])
+          (if (eof-object? x) (reverse acc) (loop (cons x acc) nbfp))))))
+  ;; 1) como no --script: sintaxe, macros e número de argumentos
+  (check forms #t (lambda (c) (report c) (exit 1)))
+  ;; 2) como programa, só para achar identificadores não definidos
+  (unless (or (null? forms) (memq (head (car forms)) '(library top-level-program)))
+    (check (list (if (eq? (head (car forms)) 'import)
+                     `(top-level-program ,@forms)
+                     `(top-level-program (import (chezscheme)) ,@forms)))
+           #f
+           (lambda (c) (when (unbound? c) (report c) (exit 1))))))
+         }}
+    }
 }
 
 # Bibliotecas do Guile: guile-procedures.txt (procedimentos em C) e os
@@ -5377,53 +6095,55 @@ qc::language scheme {
 proc qc::lang::scheme::apiSources {} {
     set rn ""
     foreach r [::qc::lget runners scheme] {
-        if {[dict get $r name] eq "guile"} { set rn $r }
+        if {[dict get $r name] eq "guile"} {set rn $r}
     }
-    if {$rn eq ""} { return {} }
+    if {$rn eq ""} {return {}}
     set exe [lindex [::qc::findExe $rn scheme] 0]
-    if {$exe eq ""} { return {} }
+    if {$exe eq ""} {return {}}
     for {set i 0} {$i < 10 && [file type $exe] eq "link"} {incr i} {
         set exe [file normalize [file join [file dirname $exe] [file readlink $exe]]]
     }
     set share [file join [file dirname [file dirname $exe]] share guile]
     set vers [lsort -dictionary [glob -nocomplain -directory $share -types d {[0-9]*}]]
-    if {![llength $vers]} { return {} }
+    if {![llength $vers]} {return {}}
     set d [lindex $vers end]
     set out {}
     set txt [file join $d guile-procedures.txt]
-    if {[file isfile $txt]} { lappend out $txt }
+    if {[file isfile $txt]} {lappend out $txt}
     lappend out $d
     set site [file join $share site [file tail $d]]
-    if {[file isdirectory $site]} { lappend out $site }
+    if {[file isdirectory $site]} {lappend out $site}
     return $out
 }
 
 # Só os define de nível superior (linha começando por "(").
 proc qc::lang::scheme::defQual {lines L name} {
-    if {[string index [lindex $lines $L] 0] ne "("} { return "" }
+    if {[string index [lindex $lines $L] 0] ne "("} {return ""}
     return $name
 }
 
 # guile-procedures.txt: blocos separados por form feed, cada um com uma ou
 # mais linhas "- Scheme Procedure: nome args" e o texto indentado.
 proc qc::lang::scheme::apiParse {f data} {
-    if {[file tail $f] ne "guile-procedures.txt"} { return - }
+    if {[file tail $f] ne "guile-procedures.txt"} {return -}
     set out {}
     foreach blk [lrange [split $data \f] 1 end] {
         set lines [split $blk \n]
         set name [string trim [lindex $lines 0]]
-        if {$name eq ""} continue
+        if {$name eq ""} {continue}
         set sigs {}
         set doc {}
         foreach l [lrange $lines 1 end] {
             if {[regexp {^- Scheme Procedure: (.*)$} $l -> s]} {
                 lappend sigs "([string trim $s])"
-            } elseif {[llength $sigs] && [llength $doc] < 14
-                      && ([string trim $l] ne "" || [llength $doc])} {
+            } elseif {
+                [llength $sigs] && [llength $doc] < 14
+                && ([string trim $l] ne "" || [llength $doc])
+            } {
                 lappend doc [string trimright $l]
             }
         }
-        if {![llength $sigs]} continue
+        if {![llength $sigs]} {continue}
         # tira a indentação comum e as linhas vazias do fim
         while {[llength $doc] && [string trim [lindex $doc end]] eq ""} {
             set doc [lrange $doc 0 end-1]
@@ -5437,13 +6157,227 @@ proc qc::lang::scheme::apiParse {f data} {
 # Indentação estilo Lisp: um nível além do "(" que envolve o cursor.
 proc qc::lang::scheme::newlineIndent {} {
     set p [::qc::enclosingOpen insert]
-    if {$p eq ""} { return "" }
+    if {$p eq ""} {return ""}
     set col [lindex [split $p .] 1]
     return [string repeat " " [expr {$col + [::qc::lget indent]}]]
 }
 
+# --- formatação (reindentação no estilo Lisp) --------------------------------
+# Regras do scheme-mode do Emacs: formas especiais têm N argumentos
+# "distinguidos" (4 colunas além do "(" quando vão para outra linha) e o
+# corpo (2 colunas); define* e def*: só corpo. Chamadas com argumento na
+# linha da cabeça alinham com ele; senão, e em listas de dados ('(...),
+# #(...), ((...) ...)), 1 coluna além do "(".
+# Linhas dentro de strings e de #| |# não mudam; ";;;" fica na coluna 0.
+
+namespace eval qc::lang::scheme {
+    # forma -> nº de argumentos distinguidos
+    variable specForms {
+        begin 0 case 1 delay 0 delay-force 0 do 2 lambda 1 lambda* 1 λ 1
+        named-lambda 2 let 1 let/named 2 let* 1
+        letrec 1 letrec* 1 let-values 1 let*-values 1 let-syntax 1
+        letrec-syntax 1 let-optional 2 let-optional* 2 let-keywords 3
+        let-keywords* 3 syntax-rules 1 syntax-case 2 with-syntax 1
+        call-with-input-file 1 call-with-output-file 1 call-with-port 1
+        call-with-values 1 with-input-from-file 1 with-output-to-file 1
+        with-input-from-port 1 with-output-to-port 1 with-fluids 1
+        with-mutex 1 dynamic-wind 3 when 1 unless 1 library 1 module 1
+        parameterize 1 guard 1 receive 2 fluid-let 1 match 1 match-lambda 0
+        match-lambda* 0 match-let 1 match-let* 1 eval-when 1 while 1
+        unwind-protect 1
+    }
+}
+
+# Nº de argumentos distinguidos da forma h, ou -1 (chamada comum).
+proc qc::lang::scheme::specN {h} {
+    variable specForms
+    if {[dict exists $specForms $h]} {return [dict get $specForms $h]}
+    if {[string match def* $h]} {return 0}
+    return -1
+}
+
+# Pilha: um item por "(" aberto -- coluna, dados?, cabeça, linha da cabeça,
+# coluna do 1º argumento na linha da cabeça (-1 = nenhum), nº de elementos.
+proc qc::lang::scheme::indentFor {stack ind} {
+    if {![llength $stack]} {return 0}
+    lassign [lindex $stack end] col data head - argCol count
+    if {$data || $head eq ""} {return [expr {$col + 1}]}
+    set n [specN $head]
+    if {$n >= 0} {
+        # o elemento desta linha é o de índice count (0 = cabeça)
+        return [expr {$col + ($count >= 1 && $count <= $n ? 2 * $ind : $ind)}]
+    }
+    if {$argCol >= 0} {return $argCol}
+    return [expr {$col + 1}]
+}
+
+# Registra um elemento (átomo, string ou lista) na lista aberta.
+proc qc::lang::scheme::element {stackVar col sym ln} {
+    upvar 1 $stackVar stack
+    if {![llength $stack]} {return}
+    lassign [lindex $stack end] c data head hl argCol count
+    if {$count == 0} {
+        set head [expr {[string is double -strict $sym] ? "" : $sym}]
+        set hl $ln
+    } elseif {$count == 1} {
+        if {$hl == $ln} {set argCol $col}
+        # let nomeado: (let loop ((...)) ...)
+        if {$head eq "let" && $sym ne ""} {set head let/named}
+    }
+    incr count
+    lset stack end [list $c $data $head $hl $argCol $count]
+}
+
+proc qc::lang::scheme::reformat {text} {
+    set ind [::qc::lget indent scheme]
+    set stack {}
+    set inStr 0
+    set bc 0
+    set out {}
+    set ln 0
+    set delims [list " " \t ( ) \[ \] \" ";"]
+    foreach line [split $text \n] {
+        incr ln
+        if {$inStr || $bc} {
+            set new $line
+        } else {
+            set new [string trimleft $line " \t"]
+            if {$new eq ""} {
+                lappend out ""
+                continue
+            }
+            if {![string match ";;;*" $new]} {
+                set new [string repeat " " [indentFor $stack $ind]]$new
+            }
+        }
+        set chars [split $new ""]
+        set n [llength $chars]
+        set pend -1
+        set pdata 0
+        set i 0
+        while {$i < $n} {
+            set c [lindex $chars $i]
+            set d [lindex $chars $i+1]
+            if {$inStr} {
+                if {$c eq "\\"} {
+                    incr i 2
+                    continue
+                }
+                if {$c eq "\""} {set inStr 0}
+                incr i
+                continue
+            }
+            if {$bc} {
+                if {$c eq "|" && $d eq "#"} {
+                    incr bc -1
+                    incr i 2
+                } elseif {$c eq "#" && $d eq "|"} {
+                    incr bc
+                    incr i 2
+                } else {
+                    incr i
+                }
+                continue
+            }
+            switch -- $c {
+                " " - "\t" {
+                    incr i
+                    continue
+                }
+                ";" {break}
+                "\"" {
+                    element stack [expr {$pend >= 0 ? $pend : $i}] "" $ln
+                    set pend -1
+                    set pdata 0
+                    set inStr 1
+                    incr i
+                    continue
+                }
+                "(" - "[" {
+                    element stack [expr {$pend >= 0 ? $pend : $i}] "" $ln
+                    lappend stack [list $i $pdata "" 0 -1 0]
+                    set pend -1
+                    set pdata 0
+                    incr i
+                    continue
+                }
+                ")" - "]" {
+                    if {[llength $stack]} {set stack [lrange $stack 0 end-1]}
+                    set pend -1
+                    set pdata 0
+                    incr i
+                    continue
+                }
+                "'" - "`" - "," {
+                    if {$pend < 0} {set pend $i}
+                    set pdata [expr {$c eq "'"}]
+                    incr i [expr {$c eq "," && $d eq "@" ? 2 : 1}]
+                    continue
+                }
+                "#" {
+                    if {$d eq "|"} {
+                        incr bc
+                        incr i 2
+                        continue
+                    }
+                    if {$d eq ";"} {
+                        incr i 2
+                        continue
+                    }
+                    if {$d eq "("} {
+                        if {$pend < 0} {set pend $i}
+                        set pdata 1
+                        incr i
+                        continue
+                    }
+                    if {$d in {' ` ,}} {
+                        # #' #` #, #,@ (sintaxe: modelos são código)
+                        if {$pend < 0} {set pend $i}
+                        set pdata 0
+                        incr i [expr {$d eq "," && [lindex $chars $i+2] eq "@" ? 3 : 2}]
+                        continue
+                    }
+                    if {$d eq "\\"} {
+                        # caractere: #\( #\; #\space ...
+                        element stack [expr {$pend >= 0 ? $pend : $i}] "" $ln
+                        set pend -1
+                        set pdata 0
+                        incr i 3
+                        while {$i < $n && [lindex $chars $i] ni $delims} {incr i}
+                        continue
+                    }
+                }
+            }
+            # átomo
+            set j $i
+            while {$j < $n && [lindex $chars $j] ni $delims} {
+                if {[lindex $chars $j] eq "|"} {
+                    incr j
+                    while {$j < $n && [lindex $chars $j] ne "|"} {incr j}
+                }
+                incr j
+            }
+            set tok [join [lrange $chars $i $j-1] ""]
+            if {[string index $tok 0] eq "#" && [lindex $chars $j] eq "("} {
+                # #u8( #vu8( ...: prefixo de vetor
+                if {$pend < 0} {set pend $i}
+                set pdata 1
+            } else {
+                element stack [expr {$pend >= 0 ? $pend : $i}] $tok $ln
+                set pend -1
+                set pdata 0
+            }
+            set i $j
+        }
+        if {!$inStr} {set new [string trimright $new " \t"]}
+        lappend out $new
+    }
+    return [join $out \n]
+}
+
 # --- OCaml / OxCaml ----------------------------------------------------------
 
+# tclint-disable line-length
 qc::language ocaml {
     name       "OCaml"
     ext        {.ml .mli .mlx}
@@ -5494,7 +6428,24 @@ qc::language ocaml {
                  {File "%F", lines? ([0-9]+)}}
     col0     1
     warnRe   {^(?:Warning|Alert)\M}
+    linters {
+        {name ocamlc label "ocamlc -c" exe {ocamlc.opt ocamlc} nearRunner 1
+         args {-c -w +a-4-29-40-41-42-44-45-48-58-59-60-66-70 -I %R %O %F}
+         optsKeep {-I 1 -w 1 -alert 1 -open 1 -ppx 1 -rectypes 0 -principal 0
+                   -strict-sequence 0 -nolabels 0 -extension 1 -extension-universe 1}
+         groupRe {^File "} warnRe {^(?:Warning|Alert)\M|^Error \((?:warning|alert)}
+         errRe {^Error\M}}
+    }
+    formatters {
+        {name ocamlformat label ocamlformat exe {ocamlformat} nearRunner 1
+         args {%C %F} output stdout config {.ocamlformat} configArg {--name %N}
+         noConfigArg {--enable-outside-detected-project}
+         groupRe {^File "|^ocamlformat:} warnRe {^Warning\M} errRe {^Error\M}}
+        {name ocp-indent label ocp-indent exe {ocp-indent} nearRunner 1
+         args {%F} output stdout}
+    }
 }
+# tclint-enable line-length
 
 # OxCaml é o compilador da Jane Street instalado como switch do opam (ex.:
 # 5.2.0+ox): procura o toplevel no switch ativo ou em ~/.opam/*ox*.
@@ -5503,16 +6454,16 @@ proc qc::lang::ocaml::findExe {rn} {
     set pfx [expr {[info exists ::env(OPAM_SWITCH_PREFIX)] ? $::env(OPAM_SWITCH_PREFIX) : ""}]
     if {[dict get $rn name] eq "oxcaml"} {
         set cands [glob -nocomplain -directory $opam *ox*/bin/ocaml]
-        if {[string match *ox* [file tail $pfx]]} { set cands [linsert $cands 0 $pfx/bin/ocaml] }
+        if {[string match *ox* [file tail $pfx]]} {set cands [linsert $cands 0 $pfx/bin/ocaml]}
     } else {
         set p [auto_execok ocaml]
-        if {$p ne ""} { return $p }
+        if {$p ne ""} {return $p}
         set cands {}
-        if {$pfx ne ""} { lappend cands $pfx/bin/ocaml }
+        if {$pfx ne ""} {lappend cands $pfx/bin/ocaml}
         lappend cands $opam/default/bin/ocaml {*}[glob -nocomplain -directory $opam */bin/ocaml]
     }
     foreach c $cands {
-        if {[file executable $c]} { return [list $c] }
+        if {[file executable $c]} {return [list $c]}
     }
     return ""
 }
@@ -5580,11 +6531,11 @@ proc qc::main {argv} {
     setupTheme
     buildUI
     set names {}
-    foreach l $langs { lappend names [lget name $l] }
+    foreach l $langs {lappend names [lget name $l]}
     .tb.lang configure -values $names
-    if {$id eq "" && $path ne ""} { set id [langForFileAny $path] }
-    if {$id eq "" || $id ni $langs} { set id $cfg(lang) }
-    if {$id eq "" || $id ni $langs} { set id [lindex $langs 0] }
+    if {$id eq "" && $path ne ""} {set id [langForFileAny $path]}
+    if {$id eq "" || $id ni $langs} {set id $cfg(lang)}
+    if {$id eq "" || $id ni $langs} {set id [lindex $langs 0]}
     setLang $id
     if {$path ne "" && [file isdirectory $path]} {
         set cfg(folder) [file normalize $path]
@@ -5602,14 +6553,14 @@ proc qc::main {argv} {
         # reabre as abas da última sessão
         set cur $cfg(tabcur)
         foreach f $cfg(tabs) {
-            if {[file isfile $f]} { openFile $f }
+            if {[file isfile $f]} {openFile $f}
         }
         set w [tabForFile $cur]
-        if {$w ne ""} { activateTab $w }
+        if {$w ne ""} {activateTab $w}
         set ::qc::status ""
     }
     applyTerminal
-    foreach e $::qc::loadErrors { conAppend "Erro ao carregar linguagem: $e\n" stderr }
+    foreach e $::qc::loadErrors {conAppend "Erro ao carregar linguagem: $e\n" stderr}
     focus $::qc::ed
     updateCursor
 }
@@ -5617,7 +6568,7 @@ proc qc::main {argv} {
 proc qc::langForFileAny {path} {
     set ext [string tolower [file extension $path]]
     foreach id $::qc::langs {
-        if {$ext in [lget ext $id]} { return $id }
+        if {$ext in [lget ext $id]} {return $id}
     }
     return ""
 }

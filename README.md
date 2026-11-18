@@ -72,6 +72,11 @@ pode ser interrompida a qualquer momento.
   argumentos do programa configuráveis por linguagem
 - Mensagens de erro clicáveis na saída: levam direto à linha (e coluna) do
   erro no editor
+- Formatar código (Editar > Formatar código, Ctrl+Shift+F) e verificar código
+  com um linter (Editar > Verificar código, F8), em segundo plano. Os
+  problemas aparecem na saída com links e as linhas ficam marcadas no editor
+  (erros em vermelho, avisos em amarelo). A formatação mexe só nas linhas que
+  mudam e é desfeita com um Ctrl+Z (veja a tabela abaixo)
 - Saída com cores ANSI, stderr, avisos e mensagens informativas destacados
 - Detecção automática do interpretador e da versão instalada
 - Modelos de código (Arquivo > Novo a partir de modelo)
@@ -103,6 +108,35 @@ Detalhes por linguagem:
   de rodar, para que os erros tragam linha e coluna.
 - **OCaml** — o runner OxCaml procura o toplevel no switch ativo do opam
   (`OPAM_SWITCH_PREFIX`) ou em `~/.opam/*ox*/bin/ocaml`.
+
+### Formatação e linter
+
+| Linguagem | Formatar (Ctrl+Shift+F) | Verificar (F8) |
+|-----------|-------------------------|----------------|
+| Tcl       | [`tclfmt`](https://github.com/nmoroze/tclint) | [`tclint`](https://github.com/nmoroze/tclint) |
+| Scala 3   | `scala fmt` (scalafmt, baixado pelo Scala CLI) | `scala compile` com `-Wunused:imports,privates,locals -deprecation -feature` |
+| Scheme (Guile) | embutido: reindentação no estilo do Emacs | `guild compile` com avisos de variável não usada/não definida, nº de argumentos, `format`… |
+| Scheme (Chez)  | embutido: reindentação no estilo do Emacs | compilação sem executar: sintaxe, nº de argumentos e identificadores não definidos |
+| OCaml / OxCaml | `ocamlformat` (ou `ocp-indent`, se não houver) | `ocamlc -c` com os avisos `:standard` do dune |
+
+- O verificador de Scheme segue o interpretador escolhido (Guile ou Chez).
+- Editar > Formatar ao salvar (por linguagem, desligado por padrão) formata
+  o arquivo a cada salvamento. O formatador embutido do Scheme roda antes de
+  gravar; as ferramentas externas rodam em segundo plano depois do Ctrl+S e
+  o arquivo é salvo de novo se algo mudar. Se a ferramenta der erro, o
+  arquivo fica salvo como estava.
+- `tclint.toml`/`.tclint`, `.scalafmt.conf` e `.ocamlformat` são procurados
+  da pasta do arquivo para cima e passados à ferramenta. Sem `.ocamlformat`,
+  o `ocamlformat` usa o perfil padrão.
+- Em OCaml, as ferramentas são procuradas primeiro na pasta do interpretador
+  escolhido (o switch do opam, no caso do OxCaml) e depois no `PATH`. O
+  `ocamlc -c` recebe `-I <pasta do arquivo>` e, das opções do interpretador,
+  só `-I`, `-w`, `-alert`, `-open`, `-ppx`, `-rectypes`, `-extension`… (não os
+  `.cma`).
+- As opções do interpretador (Ctrl+E) valem também para `scala compile` e
+  para o Chez; no `guild`, só `-L`, `-x`, `--r6rs` e `--r7rs`.
+- `tclint`/`tclfmt`: `pip install tclint`. Para usar outro executável, defina
+  `exe.<nome>.<linguagem>` em `~/.qconsolerc` (ex.: `exe.tclint.tcl`).
 
 ## Uso
 
@@ -154,7 +188,10 @@ o interpretador, as opções passadas a ele e os argumentos do programa.
 | Shift+Alt+↑ / Shift+Alt+↓ | Adicionar cursor na linha acima / abaixo |
 | Esc | Voltar a um cursor só |
 | Ctrl+Shift+D | Duplicar linha |
+| Ctrl+Shift+↑ / ↓ | Mover linha (ou seleção) para cima / baixo |
 | Ctrl+/ | Comentar/descomentar linhas |
+| Ctrl+Shift+F | Formatar código |
+| F8 | Verificar código (linter) |
 | Ctrl+Espaço | Completar palavra |
 | Tab / Shift+Tab | Indentar / Desindentar |
 | Ctrl++ / Ctrl+- / Ctrl+0 | Aumentar / diminuir / restaurar fonte |
@@ -240,7 +277,22 @@ símbolo exibido no lugar dela, ex.: `{define λ}`) (veja `langDefaults` no cód
 
 Hooks opcionais podem ser definidos como procs em `::qc::lang::<id>::` —
 `init`, `wordTag`, `prepare`, `defaultExt`, `newlineIndent`, `stderrLine`,
-`findExe` (as linguagens embutidas servem de exemplo).
+`findExe`, `reformat` (formatador embutido: texto → texto) (as linguagens
+embutidas servem de exemplo).
+
+Formatadores e linters externos ficam nas chaves `formatters` e `linters`, com
+o mesmo formato dos runners (a descrição completa das chaves está no código,
+na seção "Verificação (linter) e formatação"):
+
+```tcl
+    linters {
+        {name luacheck exe {luacheck} args {--formatter plain %F}
+         errPatterns {{%F:([0-9]+):([0-9]+):}} tag warn}
+    }
+    formatters {
+        {name stylua exe {stylua} args {%F} output inplace}
+    }
+```
 
 Modelos de código são registrados com `qc::template`:
 
