@@ -7,7 +7,7 @@
 # código roda em um processo separado (a interface não trava e a execução
 # pode ser interrompida).
 #
-# Uso: wish qconsole.tcl ?-lang tcl|scala|scheme|...? ?arquivo?
+# Uso: wish qconsole.tcl ?-lang tcl|scala|scheme|scheme-kawa|...? ?arquivo?
 #
 # ---------------------------------------------------------------------------
 # Definição de linguagens
@@ -46,7 +46,8 @@
 # defThroughBrace, col0, infoRe, warnRe, grayInfo, rainbow (1 = parênteses
 # coloridos por nível de aninhamento; ver qc::rainbow), defPatterns (regexes
 # extras de definição para o F12, com UM grupo = o nome; as palavras de
-# defWords já geram uma), docString (1 = string logo após a assinatura é
+# defWords já geram uma), defWordsRe (substitui essa regex gerada pelas
+# defWords: %W = alternativas das defWords, %N = regex de palavra; UM grupo), docString (1 = string logo após a assinatura é
 # documentação, como em Scheme), pretty (palavra -> símbolo exibido no lugar
 # dela, ex.: {define λ}; o texto não muda), linters e formatters
 # (ferramentas externas; ver "Verificação (linter) e formatação") (ver
@@ -64,6 +65,7 @@ namespace eval qc {
     variable version 2.0
     variable scriptPath [file normalize [info script]]
     variable ed "" ;# editor da aba ativa
+    variable dockCur "" ;# aba exibida na janela principal (pode não ser a ativa)
     variable tabs {} ;# editores abertos (um widget text por aba), em ordem
     variable TB ;# TB(<editor>,file|lang|hltags): estado de cada aba
     array set TB {}
@@ -106,7 +108,7 @@ namespace eval qc {
         fontsize 11 wrap 0 autoclear 1 recent {} geometry 1100x800
         lastdir "" lang "" folder "" sidebar 0 sidew 240 autocomp 1
         terminal 0 termpos side termcmd "" tabs {} tabcur "" hoverdef 1
-        pretty 1 mdpreview 1 mdw 0 recentdirs {}
+        pretty 1 mdpreview 1 mdw 0 recentdirs {} floats {}
     }
     variable T ;# terminal embutido: T(chan), T(pid), T(shown)
     array set T {}
@@ -140,7 +142,7 @@ namespace eval qc {
         sub {} styles {} indentAfter {[\{\[\(]\s*$} dedentChars "\}\)\]"
         runners {} errPatterns {} col0 0 infoRe "" warnRe "" grayInfo 0
         templates {} autoPairs {() [] \{\} \"\" ''} rainbow 0 defPatterns {}
-        docString 0 pretty {} linters {} formatters {}
+        docString 0 pretty {} linters {} formatters {} defWordsRe ""
     }
     namespace eval lang {}
 }
@@ -471,7 +473,7 @@ proc qc::buildUI {} {
         pack .tb.$name -side left
     }
     .tb.stop state disabled
-    ttk::combobox .tb.lang -state readonly -width 14 -takefocus 0 \
+    ttk::combobox .tb.lang -state readonly -width 15 -takefocus 0 \
         -textvariable ::qc::langName
     bind .tb.lang <<ComboboxSelected>> {
         qc::setLang [lindex $::qc::langs [.tb.lang current]]
@@ -482,7 +484,7 @@ proc qc::buildUI {} {
     # Painel lateral (árvore de arquivos) | painéis editor / console
     ttk::panedwindow .hp -orient horizontal
     buildSide
-    buildPreview
+    buildPreview .md .pw.ed
     ttk::panedwindow .pw -orient vertical
 
     # editor: barra de abas em cima; cada aba é um widget text (ver newEditor)
@@ -490,8 +492,8 @@ proc qc::buildUI {} {
     set f [ttk::frame .pw.ed]
     buildTabBar $f.tabs
     set gut [canvas $f.gut -background $C(gutbg) -highlightthickness 0 -bd 0 -width 40]
-    ttk::scrollbar $f.sy -orient vertical -command {qc::edScroll yview}
-    ttk::scrollbar $f.sx -orient horizontal -command {qc::edScroll xview}
+    ttk::scrollbar $f.sy -orient vertical -command {qc::hostScroll .pw.ed yview}
+    ttk::scrollbar $f.sx -orient horizontal -command {qc::hostScroll .pw.ed xview}
     buildFindBar $f.find
     grid $f.tabs -row 0 -column 0 -columnspan 3 -sticky ew
     grid $gut -row 1 -column 0 -sticky nsew
@@ -583,6 +585,7 @@ proc qc::buildMenus {} {
     $m add command -label "Fechar aba" -accelerator Ctrl+F4 -command qc::closeFile
     $m add command -label "Próxima aba" -accelerator Ctrl+Tab -command {qc::cycleTab 1}
     $m add command -label "Aba anterior" -accelerator Ctrl+Shift+Tab -command {qc::cycleTab -1}
+    $m add command -label "Desacoplar / acoplar aba" -accelerator Ctrl+Shift+T -command qc::toggleDock
     $m add separator
     $m add command -label "Sair" -accelerator Ctrl+Q -command qc::quit
     updateRecentMenu
@@ -625,6 +628,11 @@ proc qc::buildMenus {} {
     foreach id $langs {
         $m add radiobutton -label [lget name $id] -value $id -variable ::qc::langSel \
             -command [list qc::setLang $id]
+    }
+    if {[info commands ::qc::lang::scheme::writeHeader] ne ""} {
+        $m add separator
+        $m add command -label "Indicar implementação de Scheme no arquivo" \
+            -command ::qc::lang::scheme::writeHeader
     }
 
     set m [menu .mb.script -tearoff 0]
@@ -725,8 +733,12 @@ proc qc::buildFindBar {w} {
     pack $w.info -side left -padx 8
     pack $w.x -side right
 
-    trace add variable ::qc::find(pat) write {apply {args {after idle qc::markAll}}}
+    if {![info exists ::qc::findTrace]} {
+        set ::qc::findTrace 1
+        trace add variable ::qc::find(pat) write {apply {args {after idle qc::markAll}}}
+    }
     foreach e [list $w.pat $w.rep] {
+        bindtags $e [list $e QcKeys TEntry [winfo toplevel $e] all]
         bind $e <Return> {qc::findNext 1; break}
         bind $e <Shift-Return> {qc::findNext 0; break}
         bind $e <Escape> {qc::hideFind; break}
@@ -780,7 +792,9 @@ proc qc::updateTabs {} {
 proc qc::setupBindings {} {
     variable ed
     variable con
+    variable globalKeys
     set keys {
+        <Control-T>         qc::toggleDock
         <Control-n>         qc::newFile
         <Control-o>         qc::openFile
         <Control-s>         qc::save
@@ -824,6 +838,7 @@ proc qc::setupBindings {} {
         <Control-0>         {qc::zoom 0}
         <Control-a>         {qc::selectAll %W}
     }
+    set globalKeys $keys
     foreach {seq cmd} $keys {
         catch {bind QcKeys $seq "$cmd; break"}
         catch {bind . $seq $cmd}
@@ -891,21 +906,18 @@ proc qc::setupBindings {} {
     bind QcMulti <<Paste>> {if {[llength $::qc::mcur]} {qc::multiApply {qc::paste $::qc::ed}; break}}
 
     bindtags $con [list $con QcKeys Text . all]
-    foreach e {.pw.ed.find.pat .pw.ed.find.rep} {
-        bindtags $e [list $e QcKeys TEntry . all]
-    }
     bind $con <Button-3> {tk_popup .conpop %X %Y}
     bind $con <1> {focus %W}
 
-    set gut $::qc::gut
-    bind $gut <MouseWheel> {qc::wheel %D}
-    catch {bind $gut <Button-4> {$::qc::ed yview scroll -3 units}}
-    catch {bind $gut <Button-5> {$::qc::ed yview scroll 3 units}}
-    bind $gut <1> {qc::gutterClick %y}
+    bindGutter $::qc::gut
 }
 
-proc qc::wheel {d} {
-    $::qc::ed yview scroll [expr {$d > 0 ? -3 : 3}] units
+# Números de linha: rolam/clicam o editor exibido naquela janela.
+proc qc::bindGutter {g} {
+    bind $g <MouseWheel> {[qc::hostEd [winfo parent %W]] yview scroll [expr {%D > 0 ? -3 : 3}] units}
+    catch {bind $g <Button-4> {[qc::hostEd [winfo parent %W]] yview scroll -3 units}}
+    catch {bind $g <Button-5> {[qc::hostEd [winfo parent %W]] yview scroll 3 units}}
+    bind $g <1> {qc::activateTab [qc::hostEd [winfo parent %W]]; qc::gutterClick %y}
 }
 
 # Proxy do widget de texto: detecta qualquer alteração do conteúdo e do
@@ -1146,7 +1158,7 @@ proc qc::pathMoved {old new} {
             set TB($w,file) $new[string range $f [string length $old] end]
             if {$w eq $::qc::ed} {
                 variable file $TB($w,file)
-                set id [langForFile $file]
+                set id [langForFile $file "" 1]
                 if {$id ne "" && $id ne $::qc::lang} {setLang $id}
             }
         }
@@ -1711,6 +1723,7 @@ proc qc::setLang {id} {
     variable langs
     variable inited
     variable cfg
+    set id [langAlias $id]
     if {$id ni $langs} {return}
     if {$id ni $inited} {
         lappend inited $id
@@ -1932,7 +1945,7 @@ proc qc::highlight {} {
     unset -nocomplain ::qc::TB($ed,praw)
     prettyCursor
     schedGutter
-    if {[winfo ismapped .pw.ed.find]} {markAll}
+    if {[winfo ismapped [fb]]} {markAll}
 }
 
 # offset de caractere -> índice do widget text
@@ -1946,23 +1959,59 @@ proc qc::off2idx {starts off} {
 # ---------------------------------------------------------------------------
 
 proc qc::edYscroll {w args} {
-    if {$w ne $::qc::ed} {return}
-    .pw.ed.sy set {*}$args
+    if {![edVisible $w]} {return}
+    [winfo parent $w].sy set {*}$args
+    if {$w ne $::qc::ed} {
+        otherGutter $w
+        mdSync [winfo parent $w]
+        return
+    }
     schedGutter
     mdSync
     if {[llength $::qc::mcur]} {after idle {qc::drawCarets}}
 }
 
 proc qc::edXscroll {w args} {
-    if {$w ne $::qc::ed} {return}
-    .pw.ed.sx set {*}$args
+    if {![edVisible $w]} {return}
+    [winfo parent $w].sx set {*}$args
+    if {$w ne $::qc::ed} {otherGutter $w; return}
     schedGutter
     if {[llength $::qc::mcur]} {after idle {qc::drawCarets}}
 }
 
-# barras de rolagem -> editor da aba ativa
-proc qc::edScroll {cmd args} {
-    $::qc::ed $cmd {*}$args
+# barras de rolagem -> editor exibido naquela janela
+proc qc::hostScroll {host cmd args} {
+    [hostEd $host] $cmd {*}$args
+}
+
+# Editor exibido numa janela (.pw.ed = principal; senão, janela desacoplada).
+proc qc::hostEd {host} {
+    if {$host eq ".pw.ed"} {return $::qc::dockCur}
+    return $host.t
+}
+
+# O editor está à vista (aba da janela principal exibida ou desacoplada)?
+proc qc::edVisible {w} {
+    expr {[winfo parent $w] ne ".pw.ed" || $w eq $::qc::dockCur}
+}
+
+# Barra de busca da janela do editor ativo.
+proc qc::fb {} {
+    return [winfo parent $::qc::ed].find
+}
+
+# Números de linha de um editor visível que não é o ativo (ex.: rolado com
+# a roda do mouse enquanto o foco está em outra janela).
+proc qc::otherGutter {w} {
+    if {![info exists ::qc::gutO($w)]} {
+        set ::qc::gutO($w) 1
+        # tclint-disable-next-line command-args
+        after idle [list qc::drawGutter $w]
+    }
+}
+
+proc qc::edConfigure {w} {
+    if {$w eq $::qc::ed} {schedGutter} elseif {[winfo exists $w] && [edVisible $w]} {otherGutter $w}
 }
 
 proc qc::schedGutter {} {
@@ -1973,11 +2022,21 @@ proc qc::schedGutter {} {
     }
 }
 
-proc qc::drawGutter {} {
-    variable ed
-    variable gut
+proc qc::drawGutter {{ed ""}} {
     variable C
-    variable gutPending 0
+    if {$ed eq ""} {
+        variable gutPending 0
+        set ed $::qc::ed
+        set main 1
+    } else {
+        unset -nocomplain ::qc::gutO($ed)
+        if {![winfo exists $ed] || ![edVisible $ed]} {return}
+        if {$ed eq $::qc::ed} {schedGutter; return}
+        set main 0
+        # símbolos e cursores extras ficariam fora do lugar
+        foreach l [winfo children $ed] {place forget $l}
+    }
+    set gut [winfo parent $ed].gut
     $gut delete all
     set last [lindex [split [$ed index end-1c] .] 0]
     set digits [expr {max(3, [string length $last])}]
@@ -1994,7 +2053,7 @@ proc qc::drawGutter {} {
             -font QcMono -fill [expr {$n == $cur ? $C(gutcur) : $C(gutfg)}]
         set i [$ed index "$i +1 line"]
     }
-    drawPretty
+    if {$main} {drawPretty}
 }
 
 proc qc::gutterClick {y} {
@@ -2843,6 +2902,7 @@ proc qc::projIndexFile {f} {
     if {[info exists PX($f)] && [lindex $PX($f) 0] == $mt} {return}
     set id [langForFileAny $f]
     if {$id eq "" || [catch {readFile $f} data]} {projForget $f; return}
+    set id [langForFile $f $data]
     projForget $f
     set ext [string tolower [file extension $f]]
     set tk [lget tokens $id]
@@ -2910,8 +2970,13 @@ proc qc::defRegexes {id} {
     set dw [lget defWords $id]
     if {[llength $dw]} {
         set alt [join [lmap w $dw {reQuote $w}] |]
-        # "let rec x", "module type S", "type 'a t", "(define (f"
-        lappend res "(?:^|\[^\\w-\])(?:$alt)(?:\[ \\t\]+(?:$alt))*\\s+(?:'\\w+\[ \\t\]+)?\\(?($wre)"
+        set custom [lget defWordsRe $id]
+        if {$custom ne ""} {
+            lappend res [string map [list %W $alt %N $wre] $custom]
+        } else {
+            # "let rec x", "module type S", "type 'a t", "(define (f"
+            lappend res "(?:^|\[^\\w-\])(?:$alt)(?:\[ \\t\]+(?:$alt))*\\s+(?:'\\w+\[ \\t\]+)?\\(?($wre)"
+        }
     }
     lappend res {*}[lget defPatterns $id]
     set out {}
@@ -3338,6 +3403,7 @@ proc qc::navBack {} {
     }
     lassign [lindex $navStack end] f w idx
     set navStack [lrange $navStack 0 end-1]
+    set w [edResolve $w]
     if {[winfo exists $w] && $w in $::qc::tabs} {
         activateTab $w
     } elseif {$f ne ""} {
@@ -3930,10 +3996,12 @@ proc qc::applyWrap {} {
     foreach w $::qc::tabs {
         $w configure -wrap [expr {$cfg(wrap) ? "word" : "none"}]
     }
-    if {$cfg(wrap)} {
-        grid remove .pw.ed.sx
-    } else {
-        grid .pw.ed.sx
+    foreach h [concat .pw.ed [floatTops]] {
+        if {$cfg(wrap)} {
+            grid remove $h.sx
+        } else {
+            grid $h.sx
+        }
     }
     schedGutter
 }
@@ -3945,20 +4013,20 @@ proc qc::applyWrap {} {
 proc qc::showFind {replace} {
     variable ed
     variable find
-    grid .pw.ed.find
+    grid [fb]
     if {[llength [$ed tag ranges sel]]} {
         set s [$ed get sel.first sel.last]
         if {[string first \n $s] < 0} {set find(pat) $s}
     }
-    set e [expr {$replace ? ".pw.ed.find.rep" : ".pw.ed.find.pat"}]
-    if {$replace && $find(pat) eq ""} {set e .pw.ed.find.pat}
+    set e [fb].[expr {$replace ? "rep" : "pat"}]
+    if {$replace && $find(pat) eq ""} {set e [fb].pat}
     focus $e
     $e selection range 0 end
     markAll
 }
 
 proc qc::hideFind {} {
-    grid remove .pw.ed.find
+    grid remove [fb]
     $::qc::ed tag remove found 1.0 end
     focus $::qc::ed
 }
@@ -3975,13 +4043,13 @@ proc qc::markAll {} {
     variable ed
     variable find
     ::qc::_edw tag remove found 1.0 end
-    .pw.ed.find.pat configure -style TEntry
+    [fb].pat configure -style TEntry
     set find(info) ""
-    if {$find(pat) eq "" || ![winfo ismapped .pw.ed.find]} {return}
+    if {$find(pat) eq "" || ![winfo ismapped [fb]]} {return}
     set cnt {}
     if {[catch {::qc::_edw search {*}[searchOpts] -all -count cnt -- $find(pat) 1.0 end} hits]} {
         set find(info) "regex inválida"
-        .pw.ed.find.pat configure -style NotFound.TEntry
+        [fb].pat configure -style NotFound.TEntry
         return
     }
     set r {}
@@ -3990,7 +4058,7 @@ proc qc::markAll {} {
     }
     if {[llength $r]} {::qc::_edw tag add found {*}$r}
     set find(info) "[llength $hits] ocorrência(s)"
-    if {![llength $hits]} {.pw.ed.find.pat configure -style NotFound.TEntry}
+    if {![llength $hits]} {[fb].pat configure -style NotFound.TEntry}
 }
 
 proc qc::findNext {fwd} {
@@ -4320,39 +4388,104 @@ proc qc::optionsApply {} {
 # para ele, e ::qc::file é o arquivo dele.
 
 proc qc::newEditor {} {
-    variable C
-    variable cfg
-    variable TB
     variable tabs
     set w .pw.ed.t[incr ::qc::tabSeq]
-    text $w -background $C(edbg) -foreground $C(edfg) \
-        -insertbackground $C(caret) -insertwidth 2 -selectbackground $C(sel) \
-        -selectforeground {} -inactiveselectbackground $C(sel) \
-        -font QcMono -undo 1 -maxundo 0 -autoseparators 1 \
-        -wrap [expr {$cfg(wrap) ? "word" : "none"}] \
-        -bd 0 -highlightthickness 0 -padx 6 -pady 4 -tabstyle wordprocessor \
-        -yscrollcommand [list qc::edYscroll $w] -xscrollcommand [list qc::edXscroll $w]
-    setupEdTags $w
-    installProxy $w
-    bindtags $w [list $w QcHover QcComp QcMulti QcKeys QcEdit Text . all]
-    bind $w <Configure> qc::schedGutter
-    bind $w <<Modified>> [list qc::onModified $w]
-    array set TB [list $w,file "" $w,lang ""]
+    edCreate $w
+    array set ::qc::TB [list $w,file "" $w,lang ""]
     # a nova aba entra logo depois da ativa
     set i [lsearch -exact $tabs $::qc::ed]
     set tabs [linsert $tabs [expr {$i + 1}] $w]
     return $w
 }
 
+# Cria o widget text de um editor. Com peer, ele é um "peer" de outro (mesmo
+# conteúdo, tags, marcas e histórico de desfazer): é assim que uma aba muda
+# de janela, já que o Tk não move widgets entre janelas.
+proc qc::edCreate {w {peer ""}} {
+    variable C
+    variable cfg
+    set opts [list -background $C(edbg) -foreground $C(edfg) \
+        -insertbackground $C(caret) -insertwidth 2 -selectbackground $C(sel) \
+        -selectforeground {} -inactiveselectbackground $C(sel) \
+        -font QcMono -undo 1 -maxundo 0 -autoseparators 1 \
+        -wrap [expr {$cfg(wrap) ? "word" : "none"}] \
+        -bd 0 -highlightthickness 0 -padx 6 -pady 4 -tabstyle wordprocessor \
+        -yscrollcommand [list qc::edYscroll $w] -xscrollcommand [list qc::edXscroll $w]]
+    if {$peer eq ""} {
+        text $w {*}$opts
+        setupEdTags $w
+    } else {
+        set raw ::qc::raw$peer
+        $raw peer create $w {*}$opts -tabs [$raw cget -tabs]
+        # cursor e rolagem são de cada peer
+        $w mark set insert [$raw index insert]
+        set top [$raw index @0,0]
+        # tclint-disable-next-line command-args
+        after idle [list catch [list $w yview $top]]
+    }
+    installProxy $w
+    bindtags $w [list $w QcHover QcComp QcMulti QcKeys QcEdit Text [winfo toplevel $w] all]
+    bind $w <Configure> [list qc::edConfigure $w]
+    bind $w <<Modified>> [list qc::onModified $w]
+    bind $w <FocusIn> [list qc::edFocus $w]
+    # tecla/clique num editor que não é o ativo (o foco do sistema pode estar
+    # em outra janela): ele passa a ser o ativo antes de tratar o evento
+    bind $w <KeyPress> {qc::edSync %W}
+    bind $w <ButtonPress> {qc::edSync %W}
+}
+
+proc qc::edSync {w} {
+    if {$w ne $::qc::ed && $w in $::qc::tabs} {activateTab $w}
+}
+
+# Clique/foco num editor de outra janela: ele passa a ser o ativo.
+proc qc::edFocus {w} {
+    # só se o foco ainda estiver nele (eventos atrasados não roubam o foco)
+    if {$w ne $::qc::ed && $w in $::qc::tabs && [focus] eq $w} {activateTab $w}
+}
+
 proc qc::onModified {w} {
-    if {$w eq $::qc::ed} {updateTitle} else {drawTabs}
+    if {$w eq $::qc::ed} {updateTitle} else {drawTabs; floatTitle $w}
+}
+
+proc qc::dockedTabs {} {
+    lmap w $::qc::tabs {
+        if {[winfo parent $w] ne ".pw.ed"} continue
+        set w
+    }
+}
+
+proc qc::floatTops {} {
+    lmap w $::qc::tabs {
+        if {[winfo parent $w] eq ".pw.ed"} continue
+        winfo parent $w
+    }
+}
+
+# Traz para a frente a janela do editor (se o foco estiver em outra).
+proc qc::edRaise {w} {
+    set top [winfo toplevel $w]
+    set f [focus]
+    if {$f eq "" || [winfo toplevel $f] ne $top} {
+        if {[wm state $top] eq "iconic"} {wm deiconify $top}
+        raise $top
+        # outra janela: o foco do sistema precisa ir junto
+        if {[winfo ismapped $top]} {
+            # recém-colocado no grid: precisa estar mapeado para o Tk
+            # lembrar dele como o foco da janela
+            if {![winfo ismapped $w]} {update idletasks}
+            catch {focus -force $w}
+        }
+    }
 }
 
 proc qc::activateTab {w} {
     variable ed
     variable TB
     variable lang
+    variable dockCur
     if {$w eq $ed} {
+        edRaise $w
         focus $w
         return
     }
@@ -4360,11 +4493,17 @@ proc qc::activateTab {w} {
     if {$ed ne "" && [winfo exists $ed]} {
         multiClear
         acHide
-        grid remove $ed
     }
     set ed $w
     interp alias {} ::qc::_edw {} ::qc::raw$w
-    grid $w -in .pw.ed -row 1 -column 1 -sticky nsew
+    set host [winfo parent $w]
+    # na janela principal só a aba exibida fica no grid
+    if {$host eq ".pw.ed" && $dockCur ne $w} {
+        if {$dockCur ne "" && [winfo exists $dockCur]} {grid remove $dockCur}
+        grid $w -in .pw.ed -row 1 -column 1 -sticky nsew
+        set dockCur $w
+    }
+    variable gut $host.gut
     variable file $TB($w,file)
     set want [expr {$TB($w,lang) ne "" ? $TB($w,lang) : $lang}]
     if {$want ne "" && ($want ne $lang || ![info exists TB($w,hltags)])} {
@@ -4372,13 +4511,193 @@ proc qc::activateTab {w} {
     } elseif {$lang ne ""} {
         updateTitle
     }
-    .pw.ed.sy set {*}[$w yview]
-    .pw.ed.sx set {*}[$w xview]
-    if {[winfo ismapped .pw.ed.find]} {markAll}
+    $host.sy set {*}[$w yview]
+    $host.sx set {*}[$w xview]
+    if {[winfo ismapped [fb]]} {markAll}
     treeReveal
     updateCursor
     mdApply
+    edRaise $w
     focus $w
+}
+
+# --- abas desacopladas -----------------------------------------------------
+# A aba vai para uma janela própria (.flN, com o editor em .flN.ed.t e a
+# pré-visualização do Markdown em .flN.md) e sai da
+# barra de abas, mas continua em ::qc::tabs. A janela principal sempre fica
+# com pelo menos uma aba.
+
+# O editor old foi trocado por new: atualiza tudo o que guarda o caminho.
+proc qc::retarget {old new} {
+    variable TB
+    variable tabs
+    variable R
+    variable navStack
+    foreach k [array names TB $old,*] {
+        set TB($new,[string range $k [string length $old,] end]) $TB($k)
+        unset TB($k)
+    }
+    set i [lsearch -exact $tabs $old]
+    if {$i >= 0} {lset tabs $i $new}
+    if {[info exists R(ed)] && $R(ed) eq $old} {set R(ed) $new}
+    set navStack [lmap n $navStack {
+        if {[lindex $n 1] eq $old} {lset n 1 $new}
+        set n
+    }]
+    set ::qc::moved($old) $new
+}
+
+# Caminho atual de um editor que pode ter mudado de janela.
+proc qc::edResolve {w} {
+    while {![winfo exists $w] && [info exists ::qc::moved($w)]} {
+        set w $::qc::moved($w)
+    }
+    return $w
+}
+
+# Tira o editor old de cena (antes de destruí-lo).
+proc qc::edDrop {old} {
+    if {$old eq $::qc::ed} {
+        tipHide
+        multiClear
+        acHide
+        set ::qc::ed ""
+    }
+    if {$old eq $::qc::dockCur} {set ::qc::dockCur ""}
+    unset -nocomplain ::qc::gutO($old)
+}
+
+proc qc::undock {{w ""} {geom ""}} {
+    variable C
+    variable cfg
+    variable dockCur
+    if {$w eq ""} {set w $::qc::ed}
+    if {![winfo exists $w] || [winfo parent $w] ne ".pw.ed"} {return}
+    set docked [dockedTabs]
+    set j [lsearch -exact $docked $w]
+    set shown [expr {$w eq $dockCur}]
+
+    set top .fl[incr ::qc::tabSeq]
+    set h $top.ed
+    toplevel $top -background $C(ui)
+    wm withdraw $top
+    if {$geom eq ""} {
+        set gw [expr {max(500, [winfo width .pw.ed])}]
+        # Markdown: espaço também para a pré-visualização
+        if {$cfg(mdpreview) && $::qc::TB($w,lang) eq "markdown"} {
+            set gw [expr {min($gw * 2, [winfo screenwidth .] * 9 / 10)}]
+        }
+        set gh [expr {max(350, [winfo height .pw.ed])}]
+        set geom ${gw}x${gh}+[expr {[winfo rootx .pw.ed] + 40}]+[expr {[winfo rooty .pw.ed] + 40}]
+    }
+    wm geometry $top $geom
+    wm minsize $top 300 200
+    ttk::frame $top.head -style Head.TFrame
+    ttk::label $top.head.l -style Head.TLabel -anchor w
+    ttk::button $top.head.d -text "⇱ Acoplar" -style Head.TButton -takefocus 0 \
+        -command [list qc::dock $h.t]
+    pack $top.head.d -side right
+    pack $top.head.l -side left -fill x -expand 1
+    # editor | pré-visualização do Markdown (painel incluído só quando preciso)
+    ttk::panedwindow $top.pw -orient horizontal
+    ttk::frame $h
+    canvas $h.gut -background $C(gutbg) -highlightthickness 0 -bd 0 \
+        -width [$::qc::gut cget -width]
+    ttk::scrollbar $h.sy -orient vertical -command [list qc::hostScroll $h yview]
+    ttk::scrollbar $h.sx -orient horizontal -command [list qc::hostScroll $h xview]
+    buildFindBar $h.find
+    buildPreview $top.md $h
+
+    edCreate $h.t $w
+    retarget $w $h.t
+    edDrop $w
+    destroy $w
+    catch {interp alias {} $w {}}
+
+    grid $h.gut -row 0 -column 0 -sticky nsew
+    grid $h.t -row 0 -column 1 -sticky nsew
+    grid $h.sy -row 0 -column 2 -sticky ns
+    grid $h.sx -row 1 -column 1 -sticky ew
+    grid $h.find -row 2 -column 0 -columnspan 3 -sticky ew
+    grid columnconfigure $h 1 -weight 1
+    grid rowconfigure $h 0 -weight 1
+    grid remove $h.find
+    if {$cfg(wrap)} {grid remove $h.sx}
+    $top.pw add $h -weight 1
+    pack $top.head -side top -fill x
+    pack $top.pw -side top -fill both -expand 1
+    bindGutter $h.gut
+    bind $h.gut <Configure> [list qc::edConfigure $h.t]
+    foreach {seq cmd} $::qc::globalKeys {catch {bind $top $seq $cmd}}
+    wm protocol $top WM_DELETE_WINDOW [list qc::dock $h.t]
+
+    # a janela principal mostra a aba vizinha (ou uma nova, se não sobrou)
+    if {$shown} {
+        set docked [dockedTabs]
+        if {![llength $docked]} {lappend docked [newEditor]}
+        activateTab [lindex $docked [expr {min($j, [llength $docked] - 1)}]]
+    }
+    # quando aparecer, a janela nova recebe o foco
+    bind $h.t <Map> {
+        bind %W <Map> {}
+        catch {focus -force %W}
+    }
+    # foco do sistema na janela (sem widget lembrado): vai para o editor
+    bind $top <FocusIn> [list apply {{top e} {
+        if {[focus] eq $top && [winfo exists $e]} {focus $e}
+    }} $top $h.t]
+    wm deiconify $top
+    # espera a janela aparecer: antes disso o foco não chega nela, e um
+    # comando logo em seguida (Ctrl+S, Ctrl+F4) iria para a aba principal
+    waitMapped $h.t
+    activateTab $h.t
+    floatTitle $h.t
+    drawTabs
+    set ::qc::status "Aba desacoplada (Ctrl+Shift+T ou fechar a janela acopla de volta)"
+    return $top
+}
+
+proc qc::waitMapped {w {ms 1000}} {
+    set t0 [clock milliseconds]
+    while {[winfo exists $w] && ![winfo ismapped $w] && [clock milliseconds] - $t0 < $ms} {
+        after 10 {set ::qc::mapWait 1}
+        vwait ::qc::mapWait
+    }
+}
+
+proc qc::dock {{w ""}} {
+    if {$w eq ""} {set w $::qc::ed}
+    if {![winfo exists $w] || [winfo parent $w] eq ".pw.ed"} {return}
+    set top [winfo toplevel $w]
+    set n .pw.ed.t[incr ::qc::tabSeq]
+    edCreate $n $w
+    retarget $w $n
+    edDrop $w
+    # ativa antes de destruir a janela: senão o Tk devolve o foco ao último
+    # editor que o teve na janela principal
+    activateTab $n
+    destroy $top
+    catch {interp alias {} $w {}}
+    drawTabs
+    set ::qc::status "Aba acoplada"
+}
+
+# Ctrl+Shift+T
+proc qc::toggleDock {} {
+    if {[winfo parent $::qc::ed] eq ".pw.ed"} {undock} else {dock}
+}
+
+# Título da janela de uma aba desacoplada.
+proc qc::floatTitle {w} {
+    if {[winfo parent $w] eq ".pw.ed"} {return}
+    set top [winfo toplevel $w]
+    if {![winfo exists $top.head]} {return}
+    set f $::qc::TB($w,file)
+    set name [expr {$f eq "" ? "Sem título" : [file tail $f]}]
+    set mod [expr {[$w edit modified] ? " •" : ""}]
+    set dir [expr {$f eq "" ? "" : "  —  [file dirname $f]"}]
+    wm title $top "$name$mod$dir  —  qconsole"
+    $top.head.l configure -text "$name$mod"
 }
 
 # Aba para um arquivo novo: reaproveita a ativa se for "Sem título" e vazia.
@@ -4412,7 +4731,10 @@ proc qc::closeTab {w} {
         activateTab $w
         if {![confirmDiscard]} {return 0}
     }
-    if {[llength $tabs] == 1} {
+    set host [winfo parent $w]
+    set docked [dockedTabs]
+    if {$host eq ".pw.ed" && [llength $docked] == 1} {
+        activateTab $w
         variable file ""
         setContent ""
         set ::qc::status "Arquivo fechado"
@@ -4420,10 +4742,19 @@ proc qc::closeTab {w} {
     }
     set i [lsearch -exact $tabs $w]
     set tabs [lreplace $tabs $i $i]
-    if {$w eq $::qc::ed} {
-        activateTab [lindex $tabs [expr {min($i, [llength $tabs] - 1)}]]
+    if {$host eq ".pw.ed"} {
+        if {$w eq $::qc::dockCur} {
+            set j [lsearch -exact $docked $w]
+            set docked [lreplace $docked $j $j]
+            activateTab [lindex $docked [expr {min($j, [llength $docked] - 1)}]]
+        }
+        edDrop $w
+        destroy $w
+    } else {
+        if {$w eq $::qc::ed} {activateTab $::qc::dockCur}
+        edDrop $w
+        destroy [winfo toplevel $w]
     }
-    destroy $w
     catch {interp alias {} $w {}}
     array unset TB $w,*
     drawTabs
@@ -4439,15 +4770,19 @@ proc qc::closeOtherTabs {w} {
 
 # Ctrl+Tab / Ctrl+Shift+Tab (e Ctrl+PgDn / Ctrl+PgUp)
 proc qc::cycleTab {d} {
-    variable tabs
+    set tabs [dockedTabs]
     set n [llength $tabs]
-    if {$n < 2} {return}
-    set i [lsearch -exact $tabs $::qc::ed]
+    if {$n < 2} {
+        if {$n && $::qc::ed ne $::qc::dockCur} {activateTab $::qc::dockCur}
+        return
+    }
+    set i [lsearch -exact $tabs $::qc::dockCur]
     activateTab [lindex $tabs [expr {($i + $d) % $n}]]
 }
 
 # Link da saída: volta para a aba onde o programa foi executado.
 proc qc::gotoTabLine {w line col} {
+    set w [edResolve $w]
     if {[winfo exists $w]} {activateTab $w}
     gotoLine $line $col
 }
@@ -4475,6 +4810,8 @@ proc qc::buildTabBar {c} {
         -command {qc::closeTab $::qc::tabMenuW}
     $m add command -label "Fechar as outras" \
         -command {qc::closeOtherTabs $::qc::tabMenuW}
+    $m add command -label "Desacoplar em nova janela" -accelerator Ctrl+Shift+T \
+        -command {qc::undock $::qc::tabMenuW}
     $m add separator
     $m add command -label "Copiar caminho" -command {
         set f $::qc::TB($::qc::tabMenuW,file)
@@ -4513,14 +4850,14 @@ proc qc::drawTabs {} {
     set ax0 0
     set ax1 0
     set n 0
-    foreach w $tabs {
+    foreach w [dockedTabs] {
         incr n
         set f $TB($w,file)
         set name [expr {$f eq "" ? "Sem título" : [file tail $f]}]
         if {$f ne "" && [dict get $tails [file tail $f]] > 1} {
             append name " — [file tail [file dirname $f]]"
         }
-        set act [expr {$w eq $::qc::ed}]
+        set act [expr {$w eq $::qc::dockCur}]
         set bg [expr {$act ? $C(edbg) : $C(trough)}]
         set fg [expr {$act ? "#e0e0e0" : "#8a8a8a"}]
         set mod [$w edit modified]
@@ -4581,6 +4918,10 @@ proc qc::updateTitle {} {
     variable file
     set ::qc::TB($::qc::ed,file) $file
     drawTabs
+    if {[winfo parent $::qc::ed] ne ".pw.ed"} {
+        floatTitle $::qc::ed
+        return
+    }
     set name [expr {$file eq "" ? "Sem título" : [file tail $file]}]
     set mod [expr {[$::qc::ed edit modified] ? " •" : ""}]
     set dir [expr {$file eq "" ? "" : "  —  [file dirname $file]"}]
@@ -4589,7 +4930,7 @@ proc qc::updateTitle {} {
 
 proc qc::confirmDiscard {} {
     if {![$::qc::ed edit modified]} {return 1}
-    set r [tk_messageBox -parent . -icon warning -type yesnocancel \
+    set r [tk_messageBox -parent [winfo toplevel $::qc::ed] -icon warning -type yesnocancel \
         -title qconsole -message "Salvar as alterações?" \
         -detail "O arquivo foi modificado."]
     switch -- $r {
@@ -4644,23 +4985,61 @@ proc qc::fileTypes {} {
     variable langs
     variable lang
     set out [list [list [lget name] [lget ext]]]
+    set seen [list [lget ext]]
     foreach id $langs {
-        if {$id ne $lang && [llength [lget ext $id]]} {
-            lappend out [list [lget name $id] [lget ext $id]]
+        set ext [lget ext $id]
+        if {[llength $ext] && $ext ni $seen} {
+            lappend seen $ext
+            set name [lget name $id]
+            # "Scheme (Kawa)" -> "Scheme" quando outras usam as mesmas extensões
+            regsub { \(.*\)$} $name {} name
+            lappend out [list $name $ext]
         }
     }
     lappend out {"Todos os arquivos" *}
     return $out
 }
 
-proc qc::langForFile {path} {
+# Linguagem de um arquivo pela extensão. Quando várias usam a mesma (as
+# implementações de Scheme), decide o hook detect com o conteúdo (data, ou
+# lido do arquivo); sem indicação, fica a linguagem atual (keep) ou a
+# primeira com interpretador instalado.
+proc qc::langForFile {path {data ""} {keep 0}} {
     variable langs
     set ext [string tolower [file extension $path]]
-    if {$ext in [lget ext]} {return $::qc::lang}
+    set cands {}
     foreach id $langs {
-        if {$ext in [lget ext $id]} {return $id}
+        if {$ext in [lget ext $id]} {lappend cands $id}
     }
-    return ""
+    if {[llength $cands] < 2} {return [lindex $cands 0]}
+    if {$data eq "" && [file isfile $path]} {catch {set data [readFile $path]}}
+    foreach id $cands {
+        set h [hook detect $id]
+        if {$h eq ""} {continue}
+        if {![catch {$h $data $path} r] && $r in $cands} {return $r}
+        break
+    }
+    if {$keep && $::qc::lang in $cands} {return $::qc::lang}
+    return [firstInstalled $cands]
+}
+
+# Primeira das linguagens ids com interpretador encontrado (ou a primeira).
+proc qc::firstInstalled {ids} {
+    foreach id $ids {
+        set rn [currentRunner $id]
+        if {$rn ne "" && [findExe $rn $id] ne ""} {return $id}
+    }
+    return [lindex $ids 0]
+}
+
+# Nomes que não estão na lista de linguagens: "scheme" (de configurações
+# antigas, -lang scheme, cercas ```scheme) vira a implementação padrão.
+proc qc::langAlias {id} {
+    if {$id eq "scheme" && $id ni $::qc::langs} {
+        set ids [lsearch -all -inline -glob $::qc::langs scheme-*]
+        if {[llength $ids]} {return [firstInstalled $ids]}
+    }
+    return $id
 }
 
 proc qc::openFile {{path ""}} {
@@ -4688,7 +5067,7 @@ proc qc::openFile {{path ""}} {
     freshTab
     variable file [file normalize $path]
     set cfg(lastdir) [file dirname $file]
-    set id [langForFile $file]
+    set id [langForFile $file $data]
     if {$id ne "" && $id ne $::qc::lang} {setLang $id}
     setContent $data
     addRecent $file
@@ -4841,6 +5220,12 @@ proc qc::quit {} {
         if {$TB($w,file) ne ""} {lappend cfg(tabs) $TB($w,file)}
     }
     set cfg(tabcur) $TB($::qc::ed,file)
+    set cfg(floats) {}
+    foreach w $::qc::tabs {
+        if {[winfo parent $w] ne ".pw.ed" && $TB($w,file) ne ""} {
+            lappend cfg(floats) [list $TB($w,file) [wm geometry [winfo toplevel $w]]]
+        }
+    }
     stop
     termKill
     saveCfg
@@ -5982,6 +6367,7 @@ proc qc::showShortcuts {} {
         "Ctrl+F4               Fechar aba"
         "Ctrl+Tab / Ctrl+PgDn  Próxima aba"
         "Ctrl+Shift+Tab / PgUp Aba anterior"
+        "Ctrl+Shift+T          Desacoplar / acoplar aba"
         "Ctrl+Q                Sair"
         ""
         "Ctrl+Z / Ctrl+Y       Desfazer / Refazer"
@@ -6733,10 +7119,12 @@ proc qc::md::langId {info} {
     set info [string tolower $info]
     if {$info eq ""} {return ""}
     if {$info in $::qc::langs} {return $info}
-    set alias {console shell shell shell bash shell zsh shell guile scheme
+    set alias {console shell shell shell bash shell zsh shell scheme scheme
+               guile scheme-guile chez scheme-chez kawa scheme-kawa
                racket scheme lisp scheme ml ocaml tk tcl sc scala}
-    if {[dict exists $alias $info] && [dict get $alias $info] in $::qc::langs} {
-        return [dict get $alias $info]
+    if {[dict exists $alias $info]} {
+        set id [::qc::langAlias [dict get $alias $info]]
+        if {$id in $::qc::langs} {return $id}
     }
     foreach id $::qc::langs {
         if {".$info" in [::qc::lget ext $id]} {return $id}
@@ -7036,39 +7424,47 @@ namespace eval qc {
     }
 }
 
-proc qc::buildPreview {} {
+# Painel de pré-visualização f (com o texto em f.t) da janela cujo editor
+# fica em host (.pw.ed na principal).
+proc qc::buildPreview {f host} {
     variable C
-    ttk::frame .md
-    ttk::frame .md.head -style Head.TFrame
-    ttk::label .md.head.l -text "Pré-visualização" -style Head.TLabel -anchor w
-    ttk::button .md.head.x -text ✕ -style Head.TButton -takefocus 0 \
+    variable MD
+    ttk::frame $f
+    ttk::frame $f.head -style Head.TFrame
+    ttk::label $f.head.l -text "Pré-visualização" -style Head.TLabel -anchor w
+    ttk::button $f.head.x -text ✕ -style Head.TButton -takefocus 0 \
         -command {set ::qc::cfg(mdpreview) 0; qc::mdApply}
-    ttk::button .md.head.b -text "Navegador" -style Head.TButton -takefocus 0 \
-        -command qc::mdBrowser
-    ttk::button .md.head.e -text "Exportar HTML…" -style Head.TButton -takefocus 0 \
-        -command qc::mdExport
-    pack .md.head.x .md.head.b .md.head.e -side right
-    pack .md.head.l -side left -fill x -expand 1
-    set w [text .md.t -background $C(edbg) -foreground $C(mdfg) -wrap word \
+    ttk::button $f.head.b -text "Navegador" -style Head.TButton -takefocus 0 \
+        -command [list qc::mdAct $host qc::mdBrowser]
+    ttk::button $f.head.e -text "Exportar HTML…" -style Head.TButton -takefocus 0 \
+        -command [list qc::mdAct $host qc::mdExport]
+    pack $f.head.x $f.head.b $f.head.e -side right
+    pack $f.head.l -side left -fill x -expand 1
+    set w [text $f.t -background $C(edbg) -foreground $C(mdfg) -wrap word \
         -font [mdFont body] -bd 0 -highlightthickness 0 -padx 18 -pady 12 \
         -cursor arrow -insertwidth 0 -selectbackground $C(sel) \
         -selectforeground {} -inactiveselectbackground $C(sel) \
-        -spacing1 1 -spacing3 1 -yscrollcommand {.md.sy set}]
-    ttk::scrollbar .md.sy -orient vertical -command [list $w yview]
-    grid .md.head - -sticky ew
-    grid $w .md.sy -sticky nsew
-    grid columnconfigure .md 0 -weight 1
-    grid rowconfigure .md 1 -weight 1
+        -spacing1 1 -spacing3 1 -yscrollcommand [list $f.sy set]]
+    ttk::scrollbar $f.sy -orient vertical -command [list $w yview]
+    grid $f.head - -sticky ew
+    grid $w $f.sy -sticky nsew
+    grid columnconfigure $f 0 -weight 1
+    grid rowconfigure $f 1 -weight 1
+    set MD(H,$w) $host
+    set MD(L,$w) {}
+    set MD(R,$w) {}
+    set MD(D,$w) [pwd]
+    bind $w <Destroy> [list array unset ::qc::MD *,$w]
     # só leitura, mas com seleção e cópia
-    bindtags $w [list $w QcKeys QcMdView Text . all]
+    bindtags $w [list $w QcKeys QcMdView Text [winfo toplevel $w] all]
     bind QcMdView <KeyPress> {
         if {%K ni {Up Down Left Right Prior Next Home End}} break
     }
     foreach ev {<<Cut>> <<Paste>> <<Clear>> <<Undo>> <<Redo>> <BackSpace> <Delete> <Return>} {
         bind QcMdView $ev break
     }
-    bind $w <Double-1> {qc::mdGotoSource %x %y; break}
-    bind $w <Configure> qc::mdRules
+    bind $w <Double-1> {qc::mdGotoSource %W %x %y; break}
+    bind $w <Configure> [list qc::mdRules $w]
     bind $w <Control-MouseWheel> {qc::zoom [expr {%D > 0 ? 1 : -1}]; break}
 
     $w tag configure p -spacing3 10
@@ -7144,33 +7540,117 @@ proc qc::mdFontSize {name} {
 proc qc::mdZoom {} {
     variable MD
     foreach name [dict keys $MD(fonts)] {mdFontSize $name}
-    if {$MD(shown)} {mdRender}
+    foreach host [mdHosts] {
+        if {[mdShown $host]} {mdRender $host}
+    }
 }
 
+# Janelas com editor: a principal e as desacopladas.
+proc qc::mdHosts {} {
+    return [concat .pw.ed [floatTops]]
+}
+
+# Painel de pré-visualização da janela do editor host.
+proc qc::mdPv {host} {
+    if {$host eq ".pw.ed"} {return .md}
+    return [winfo toplevel $host].md
+}
+
+proc qc::mdShown {host} {
+    set f [mdPv $host]
+    if {$host eq ".pw.ed"} {return [expr {$f in [.hp panes]}]}
+    return [expr {[winfo exists $f] && $f in [[winfo toplevel $host].pw panes]}]
+}
+
+proc qc::edLang {e} {
+    if {$e eq $::qc::ed} {return $::qc::lang}
+    return $::qc::TB($e,lang)
+}
+
+# A janela host deve mostrar a pré-visualização (a aba dela é Markdown)?
+proc qc::mdWant {host} {
+    set e [hostEd $host]
+    expr {$::qc::cfg(mdpreview) && $e ne "" && [winfo exists $e] && [edLang $e] eq "markdown"}
+}
+
+# Pré-visualização da aba ativa está à vista?
 proc qc::mdVisible {} {
-    return [expr {$::qc::cfg(mdpreview) && $::qc::lang eq "markdown"}]
+    if {$::qc::ed eq "" || ![winfo exists $::qc::ed]} {return 0}
+    return [mdWant [winfo parent $::qc::ed]]
 }
 
-# Mostra/esconde o painel conforme a aba ativa e a opção.
+# Botões do painel: agem sobre a aba daquela janela.
+proc qc::mdAct {host cmd} {
+    set e [hostEd $host]
+    if {$e ne "" && [winfo exists $e]} {activateTab $e}
+    $cmd
+}
+
+# Divisor editor | pré-visualização.
+proc qc::mdSash {host} {
+    variable cfg
+    if {$host eq ".pw.ed"} {
+        set pw .hp
+    } else {
+        set pw [winfo toplevel $host].pw
+    }
+    set k [expr {[llength [$pw panes]] - 2}]
+    if {$k < 0} {return}
+    set wd [winfo width $pw]
+    if {$host eq ".pw.ed"} {
+        set w [expr {$cfg(mdw) > 100 ? $cfg(mdw) : $wd * 45 / 100}]
+    } else {
+        set w [expr {$wd / 2}]
+    }
+    catch {$pw sashpos $k [expr {max(200, $wd - $w)}]}
+}
+
+# Inclui/remove o painel da janela host; 1 se acabou de ser incluído.
+proc qc::mdPane {host want} {
+    variable cfg
+    set f [mdPv $host]
+    set shown [mdShown $host]
+    if {$host eq ".pw.ed"} {
+        set pw .hp
+    } else {
+        set pw [winfo toplevel $host].pw
+    }
+    if {$want && !$shown} {
+        $pw add $f -weight 1
+        update idletasks
+        if {[winfo ismapped $pw] && [winfo width $pw] > 1} {
+            mdSash $host
+        } else {
+            # janela ainda sem tamanho (recém-criada): posiciona ao aparecer
+            bind $pw <Configure> [list apply {{pw host} {
+                if {[winfo width $pw] > 1} {
+                    bind $pw <Configure> {}
+                    qc::mdSash $host
+                }
+            }} $pw $host]
+        }
+        return 1
+    } elseif {!$want && $shown} {
+        if {$host eq ".pw.ed"} {set cfg(mdw) [winfo width $f]}
+        $pw forget $f
+    }
+    return 0
+}
+
+# Mostra/esconde os painéis conforme a aba de cada janela e a opção.
 proc qc::mdApply {} {
     variable MD
-    variable cfg
     if {![winfo exists .md]} {return}
-    set want [mdVisible]
-    set shown [expr {".md" in [.hp panes]}]
-    if {$want && !$shown} {
-        .hp add .md -weight 1
-        update idletasks
-        set k [expr {[llength [.hp panes]] - 2}]
-        set wd [winfo width .hp]
-        set pw [expr {$cfg(mdw) > 100 ? $cfg(mdw) : $wd * 45 / 100}]
-        catch {.hp sashpos $k [expr {max(200, $wd - $pw)}]}
-    } elseif {!$want && $shown} {
-        set cfg(mdw) [winfo width .md]
-        .hp forget .md
+    set act [expr {$::qc::ed ne "" && [winfo exists $::qc::ed] ? [winfo parent $::qc::ed] : ""}]
+    foreach host [mdHosts] {
+        set want [mdWant $host]
+        if {[mdPane $host $want] && $host ne $act} {
+            # tclint-disable-next-line command-args
+            after idle [list qc::mdRender $host]
+        }
     }
-    set MD(shown) $want
-    if {$want} {
+    set MD(shown) [mdVisible]
+    if {$MD(shown)} {
         after cancel $MD(after)
         set MD(after) [after idle qc::mdRender]
     }
@@ -7200,14 +7680,20 @@ proc qc::mdSched {} {
     set MD(after) [after 250 qc::mdRender]
 }
 
-proc qc::mdRender {} {
+proc qc::mdRender {{host ""}} {
     variable MD
-    variable ed
-    if {![mdVisible] || ![winfo exists .md.t]} {return}
-    set w .md.t
+    if {$host eq ""} {
+        if {$::qc::ed eq "" || ![winfo exists $::qc::ed]} {return}
+        set host [winfo parent $::qc::ed]
+    }
+    if {![winfo exists $host] || ![mdWant $host]} {return}
+    set ed [hostEd $host]
+    set w [mdPv $host].t
+    if {![winfo exists $w]} {return}
+    set f [expr {$ed eq $::qc::ed ? $::qc::file : $::qc::TB($ed,file)}]
     set MD(lines) {}
     set MD(rules) {}
-    set MD(dir) [expr {$::qc::file ne "" ? [file dirname $::qc::file] : [pwd]}]
+    set MD(dir) [expr {$f ne "" ? [file dirname $f] : [pwd]}]
     $w configure -state normal
     $w delete 1.0 end
     foreach m [$w mark names] {
@@ -7227,8 +7713,11 @@ proc qc::mdRender {} {
     # sem linha em branco sobrando no fim
     while {[$w get "end-2c"] eq "\n" && [$w compare end-2c > 1.0]} {$w delete end-2c}
     $w configure -state disabled
-    mdRules
-    mdSyncNow
+    set MD(L,$w) $MD(lines)
+    set MD(R,$w) $MD(rules)
+    set MD(D,$w) $MD(dir)
+    mdRules $w
+    mdSyncNow $host
 }
 
 # Tag de margens (criada sob demanda).
@@ -7382,12 +7871,11 @@ proc qc::mdRule {w ind} {
     lappend MD(rules) [list $f $ind]
 }
 
-proc qc::mdRules {} {
+proc qc::mdRules {w} {
     variable MD
-    set w .md.t
-    if {![winfo exists $w] || ![info exists MD(rules)]} {return}
+    if {![winfo exists $w] || ![info exists MD(R,$w)]} {return}
     set full [expr {[winfo width $w] - 2 * [$w cget -padx] - 6}]
-    foreach r $MD(rules) {
+    foreach r $MD(R,$w) {
         lassign $r f ind
         if {[winfo exists $f]} {$f configure -width [expr {max(10, $full - $ind)}]}
     }
@@ -7461,7 +7949,7 @@ proc qc::mdInl {w nodes st} {
             link {
                 lassign $nd - href title
                 set lt lnk[incr MD(links)]
-                $w tag bind $lt <1> [list qc::mdOpenLink $href]
+                $w tag bind $lt <1> [list qc::mdOpenLink $href $w]
                 $w tag bind $lt <Enter> [list set ::qc::status $href]
                 set inner [lrange $nd 3 end]
                 if {![llength $inner]} {set inner [list [list t $href]]}
@@ -7506,11 +7994,11 @@ proc qc::mdImage {src} {
     return $img
 }
 
-proc qc::mdOpenLink {href} {
+proc qc::mdOpenLink {href {w .md.t}} {
     variable MD
     if {[string match #* $href]} {
         set id [string range $href 1 end]
-        if {"anchor:$id" in [.md.t mark names]} {.md.t yview anchor:$id}
+        if {"anchor:$id" in [$w mark names]} {$w yview anchor:$id}
         return
     }
     if {[regexp {^(?:https?|ftp|mailto|file):} $href]} {
@@ -7518,7 +8006,7 @@ proc qc::mdOpenLink {href} {
         return
     }
     set p [regsub {#.*$} $href ""]
-    if {[file pathtype $p] ne "absolute"} {set p [file join $MD(dir) $p]}
+    if {[file pathtype $p] ne "absolute"} {set p [file join $MD(D,$w) $p]}
     if {![file exists $p]} {
         set ::qc::status "Não encontrado: $p"
         return
@@ -7550,30 +8038,35 @@ proc qc::mdOpenExternal {target} {
 }
 
 # Rolagem do editor -> pré-visualização (interpola entre os blocos).
-proc qc::mdSync {} {
+proc qc::mdSync {{host ""}} {
     variable MD
-    if {!$MD(shown) || $MD(sync)} {return}
-    set MD(sync) 1
-    after idle qc::mdSyncNow
+    if {$host eq ""} {set host [winfo parent $::qc::ed]}
+    if {[info exists MD(sync,$host)] || ![mdShown $host]} {return}
+    set MD(sync,$host) 1
+    # tclint-disable-next-line command-args
+    after idle [list qc::mdSyncNow $host]
 }
 
-proc qc::mdSyncNow {} {
+proc qc::mdSyncNow {{host ""}} {
     variable MD
-    variable ed
-    set MD(sync) 0
-    if {!$MD(shown) || ![llength $MD(lines)]} {return}
-    set w .md.t
+    if {$host eq ""} {set host [winfo parent $::qc::ed]}
+    unset -nocomplain MD(sync,$host)
+    if {![winfo exists $host] || ![mdShown $host]} {return}
+    set ed [hostEd $host]
+    set w [mdPv $host].t
+    if {![winfo exists $ed] || ![llength $MD(L,$w)]} {return}
+    set lines $MD(L,$w)
     lassign [$ed yview] top bot
     if {$top <= 0} {$w yview moveto 0; return}
     if {$bot >= 1} {$w yview moveto 1; return}
     set T [lindex [split [$ed index @0,0] .] 0]
-    set k [lsearch -bisect -integer $MD(lines) $T]
+    set k [lsearch -bisect -integer $lines $T]
     if {$k < 0} {$w yview moveto 0; return}
-    set l0 [lindex $MD(lines) $k]
+    set l0 [lindex $lines $k]
     if {[catch {
         set y0 [$w count -ypixels 1.0 src$l0]
-        if {$k + 1 < [llength $MD(lines)]} {
-            set l1 [lindex $MD(lines) $k+1]
+        if {$k + 1 < [llength $lines]} {
+            set l1 [lindex $lines $k+1]
             set y1 [$w count -ypixels 1.0 src$l1]
         } else {
             set l1 [lindex [split [$ed index end] .] 0]
@@ -7589,8 +8082,10 @@ proc qc::mdSyncNow {} {
 }
 
 # Duplo clique na pré-visualização: leva o editor à linha do bloco.
-proc qc::mdGotoSource {x y} {
-    set w .md.t
+proc qc::mdGotoSource {w x y} {
+    set e [hostEd $::qc::MD(H,$w)]
+    if {$e eq "" || ![winfo exists $e]} {return}
+    activateTab $e
     set idx [$w index @$x,$y]
     set m [$w mark previous "$idx +1c"]
     while {$m ne "" && ![regexp {^src([0-9]+)$} $m -> line]} {
@@ -8053,6 +8548,299 @@ case class Pessoa(nome: String, idade: Int) derives ReadWriter
   stdio.fflush(null)
 }
 
+# --- Groovy ------------------------------------------------------------------
+# defWordsRe: "def nome", mas não o tipo de "def String s" / "val List<T> xs".
+# Scripts rodam com "groovy" (Groovy 2.4 a 6). O log do Java (JUL) sai sem o
+# cabeçalho de data/classe que o Groovy 6 põe antes de "Caught:".
+
+# tclint-disable line-length
+qc::language groovy {
+    name     Groovy
+    ext      {.groovy .gvy .gy .gsh .gradle}
+    comment  //
+    commentRe {\s*//.*$}
+    indent   4
+    indentAfter {(?:[\{\[\(]|->)\s*$}
+    tokens {
+        directive {^#![^\n]*}
+        comment   {//[^\n]*|/\*(?:[^*]|\*(?!/))*(?:\*/)?}
+        string    {"""(?:[^"\\]|\\.|"(?!""))*(?:""")?|'''(?:[^'\\]|\\.|'(?!''))*(?:''')?|"(?:[^"\\\n]|\\.)*"?|'(?:[^'\\\n]|\\.)*'?}
+        string    {\$/(?:[^/$]|\$[/$]|\$(?![/$])|/(?!\$))*(?:/\$)?}
+        string    {[=~][ \t]*(/(?:[^/*\\\n]|\\.)(?:[^/\\\n]|\\.)*/)}
+        number    {\m(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|[0-9][0-9_]*(?:\.[0-9][0-9_]*)?(?:[eE][-+]?[0-9]+)?)[lLiIgGdDfF]?\M}
+        annot     {@[[:alpha:]_][[:alnum:]_.]*}
+        word      {[[:alpha:]_][[:alnum:]_]*}
+        brace     {[][{}()]}
+    }
+    words {
+        keyword {
+            abstract as assert async await break case catch class const continue
+            def default defer do else enum extends false final finally for goto if
+            implements import in instanceof interface module native new non null
+            package permits private protected public record return sealed static
+            strictfp super switch synchronized this threadsafe throw throws trait
+            transient true try val var volatile while yield
+        }
+        type {boolean byte char double float int long short void}
+        builtin {
+            println print printf sprintf it delegate owner evaluate sleep use with
+            tap each eachWithIndex collect findAll find inject every any grep
+        }
+    }
+    defWords {def val var class interface trait enum record}
+    defWordsRe {(?:^|[^\w-])(?:%W)(?:[ \t]+(?:%W))*[ \t]+(%N)(?![ \t]*(?:<[^\n()=]*>)?(?:\[\])*[ \t]+[[:alpha:]_][[:alnum:]_]*[ \t]*(?:[=;,)(]|$))}
+    defPatterns {
+        {\m(?:val|var|def|final)[ \t]+(?:[A-Z][[:alnum:]_.]*(?:<[^\n()=]*>)?|boolean|byte|char|double|float|int|long|short)(?:\[\])*[ \t]+([[:alpha:]_][[:alnum:]_]*)}
+        {^[ \t]*(?:(?:public|private|protected|static|final|abstract|synchronized|default|def)[ \t]+)*(?:[A-Z][[:alnum:]_.]*(?:<[^\n()=]*>)?|void|boolean|byte|char|double|float|int|long|short)(?:\[\])*[ \t]+([[:alpha:]_][[:alnum:]_]*)[ \t]*\(}
+    }
+    capType  type
+    sub      { string {{^(?:"|\$/|/)} interp {\$\{[^\}\n]*\}?|\$[[:alpha:]_][[:alnum:]_]*(?:\.[[:alpha:]_][[:alnum:]_]*)*}} }
+    runners {
+        {name groovy label Groovy exe {groovy}
+         args {-Djava.util.logging.SimpleFormatter.format=%5$s%6$s%n %O %F %A}
+         version {--version} versionRe {Groovy Version: (\S+)}
+         searchHint "groovy (PATH, GROOVY_HOME ou SDKMAN)"
+         optsHint "-cp lib/*   --compile-static   -Dchave=valor   -Dgroovy.grape.report.downloads=true"}
+    }
+    errPatterns {{%F: ([0-9]+): .*@ line [0-9]+, column ([0-9]+)} {%F: ([0-9]+):} {\(%F:([0-9]+)\)}}
+    warnRe   {^WARNING:|^\s*module not found:}
+    infoRe   {^\s+at (?:groovy\.|org\.(?:codehaus|apache)\.groovy\.|java\.|jdk\.|sun\.)|^\s+\.\.\. [0-9]+ more|^\s*(?::{2,}|====|file:|https?://|-- artifact|/\S+\.(?:xml|pom|jar)$|tried$)|^(?:Preparing to download|Downloaded )|^\s+\[(?:SUCCESSFUL|NOT REQUIRED|FAILED)}
+    linters {
+        {name groovyc label groovyc exe {groovyc} nearRunner 1
+         args {-d %D/classes %O %F}
+         optsKeep {-cp 1 -classpath 1 --classpath 1 --compile-static 0 --type-checked 0 -indy 0}
+         groupRe {: [0-9]+: } errRe {.}
+         ignoreRe {startup failed:$|^[0-9]+ errors?$}}
+        {name npm-groovy-lint label npm-groovy-lint exe {npm-groovy-lint}
+         args {--output txt --loglevel warning --failon error %C %F}
+         config {.groovylintrc.json .groovylintrc.js .groovylintrc} configArg {--config %P}
+         errPatterns {{^\s*([0-9]+)\s+(?:error|warning|info)\M}}
+         warnRe {^\s*[0-9]+\s+warning\M} errRe {^\s*[0-9]+\s+error\M}
+         ignoreRe {^[│├┌└]|npm-groovy-lint results|^Failure:|^ *[0-9]+ (?:warning|info)\(s\)|\.groovy$|\.gradle$}}
+    }
+    formatters {
+        {name npm-groovy-lint label "npm-groovy-lint --format" exe {npm-groovy-lint}
+         args {--format %C %F} output inplace
+         config {.groovylintrc.json .groovylintrc.js .groovylintrc} configArg {--config %P}
+         errPatterns {{^\s*([0-9]+)\s+(?:error|warning|info)\M}}
+         errRe {^\s*[0-9]+\s+error\M}
+         ignoreRe {^[│├┌└]|npm-groovy-lint results|^Failure:|^ *[0-9]+ (?:warning|info)\(s\)|\.groovy$|\.gradle$}}
+    }
+}
+# tclint-enable line-length
+
+# Desestruturação ("def (a, b) = ...", com tipo, "x: a" ou "*resto"): um
+# padrão de F12 por posição na lista (o regexp -all não acha sobrepostos).
+apply {{} {
+    set type {(?:[A-Z][[:alnum:]_.]*(?:<[^\n()=]*>)?|boolean|byte|char|double|float|int|long|short)(?:\[\])*}
+    set pre {(?:\*|[[:alpha:]_][[:alnum:]_]*[ \t]*:[ \t]*|TYPE[ \t]+)?}
+    set pre [string map [list TYPE $type] $pre]
+    for {set k 0} {$k < 8} {incr k} {
+        dict lappend ::qc::L(groovy) defPatterns [string cat \
+            {\m(?:def|var|val|final)[ \t]*\((?:[^,()\n]*,)} "{$k}" {[ \t]*} $pre \
+            {([[:alpha:]_][[:alnum:]_]*)[ \t]*(?=(?:,[^()\n]*)?\)[ \t]*=(?![=~]))}]
+    }
+}}
+
+# Exceção não tratada no Groovy 6: o log do Java traz "Caught: {0}" e a
+# pilha completa (até uma linha em branco); depois vem a pilha já limpa, sem
+# os quadros internos do Groovy. Só a segunda é mostrada.
+namespace eval qc::lang::groovy {
+    variable skip 0
+}
+
+proc qc::lang::groovy::stderrLine {line} {
+    variable skip
+    # @Grab que não resolveu: a mensagem não diz a linha; aponta para o
+    # @Grab da dependência no editor
+    if {[regexp {unresolved dependency: ([^#\s]+)#([^;\s]+);([^:\]\s]+)} $line -> g a v]} {
+        if {[string match "java.lang.RuntimeException:*" $line]} {return {}}
+        set n [grabLine $g $a]
+        set msg "Dependência não encontrada: $g:$a:$v"
+        if {$n > 0} {append msg "  ($::qc::R(name):$n)"}
+        return [list stderr $msg]
+    }
+    if {[string trim $line] eq "Caught: {0}"} {
+        set skip 1
+        return {}
+    }
+    if {$skip} {
+        if {[string trim $line] eq ""} {
+            set skip 0
+            return {}
+        }
+        # 1ª linha: a exceção; depois, quadros "at", "... n more", "Caused by"
+        if {$skip == 1 || [regexp {^\s|^Caused by:} $line]} {
+            set skip 2
+            return {}
+        }
+        set skip 0
+    }
+    return -
+}
+
+# Linha (do script executado) do @Grab de grupo:artefato, ou 0.
+proc qc::lang::groovy::grabLine {g a} {
+    upvar #0 ::qc::R R
+    if {![info exists R(ed)] || ![winfo exists $R(ed)]} {return 0}
+    set q {['"]}
+    set ga [::qc::reQuote $g:$a]
+    set ma "group\\s*\[:=\]\\s*$q[::qc::reQuote $g]$q.*module\\s*\[:=\]\\s*$q[::qc::reQuote $a]$q"
+    set L 0
+    foreach ln [split [$R(ed) get 1.0 end-1c] \n] {
+        incr L
+        if {[string match *@Grab* $ln] && ([regexp -- $ga $ln] || [regexp -- $ma $ln])} {
+            set n [expr {$L - $R(lineoff)}]
+            return [expr {$n > 0 && $n <= $R(nlines) ? $n : 0}]
+        }
+    }
+    return 0
+}
+
+# Palavras-chave contextuais do Groovy (as do Groovy 6 inclusive): também
+# valem como nomes ("def val = 5", "record.a", "[async, await]"), então só são
+# destacadas em posição de palavra-chave.
+namespace eval qc::lang::groovy {
+    variable soft {val var record async await defer module trait yield permits sealed non}
+    variable mods {(?:(?:public|private|protected|static|final|abstract|synchronized|default)[ \t]+)*}
+    variable type {(?:[A-Z][[:alnum:]_.]*(?:<[^\n()=]*>)?|void|boolean|byte|char|double|float|int|long|short)(?:\[\])*}
+}
+
+# Também: nome de método declarado com tipo ("String nome(", "static void
+# main(") e de variável declarada com tipo ("val String s", "final int n")
+# recebem a tag de definição; o tipo nesse caso fica como tipo.
+proc qc::lang::groovy::wordTag {word tag txt a} {
+    variable soft
+    variable mods
+    variable type
+    set e [expr {$a + [string length $word]}]
+    set ls [expr {[string last \n $txt $a] + 1}]
+    set before [string range $txt $ls [expr {$a - 1}]]
+    set nl [string first \n $txt $e]
+    set after [string trimleft [string range $txt $e [expr {$nl < 0 ? "end" : $nl - 1}]] " \t"]
+    if {$tag eq "keyword" && $word in $soft} {
+        if {$word eq "non"} {
+            return [expr {[string match -sealed* [string range $txt $e end]] ? "keyword" : ""}]
+        }
+        # nome: depois de "." ou "def", antes de atribuição, separador ou fim
+        if {[regexp {(?:\.|\mdef[ \t]+)$} $before]} {return ""}
+        if {$after eq "" || [regexp {^(?:=(?![=~])|[,;:.)\]\}]|\?\.)} $after]} {return ""}
+        if {[string index $after 0] eq "("} {
+            # "val (a, b) = ...": desestruturação; fora isso, chamada val(x)
+            if {$word in {val var} && [regexp {^\([^()\n]*\)[ \t]*=(?![=~])} $after]} {
+                return keyword
+            }
+            if {$word ne "await"} {return ""}
+        }
+        return keyword
+    }
+    if {$tag ne ""} {return $tag}
+    # desestruturação: "def (a, b) = ...", "val (int a, String b) = ...",
+    # "def (x: a, y: b) = ...", "def (a, *resto) = ..." (o nome é o último
+    # termo de cada item)
+    if {[regexp {\m(?:def|var|val|final)[ \t]*\([^()\n]*$} $before]
+        && [regexp {^(?:,[^()\n]*)?\)[ \t]*=(?![=~])} $after]} {
+        return defname
+    }
+    # "val String s": o tipo continua tipo (não é o nome definido)
+    if {[string is upper [string index $word 0]]
+        && [regexp {\m(?:val|var|def|final)[ \t]+$} $before]
+        && [regexp {^(?:<[^\n()=]*>)?(?:\[\])*[ \t]*[[:alpha:]_]} $after]} {
+        return type
+    }
+    if {[regexp "\\m(?:val|var|def|final)\[ \t\]+$type\[ \t\]+\$" $before]} {return defname}
+    if {[string index $after 0] ne "("} {return ""}
+    if {[regexp "^\[ \t\]*$mods$type\[ \t\]+\$" $before]} {return defname}
+    return ""
+}
+
+# Fora do PATH (ex.: aberto pelo menu do sistema): GROOVY_HOME ou SDKMAN.
+proc qc::lang::groovy::findExe {rn} {
+    set p [auto_execok groovy]
+    if {$p ne ""} {return $p}
+    set cands {}
+    if {[info exists ::env(GROOVY_HOME)]} {lappend cands [file join $::env(GROOVY_HOME) bin groovy]}
+    set sdk [expr {[info exists ::env(SDKMAN_DIR)] ? $::env(SDKMAN_DIR) : [file join [::qc::homeDir] .sdkman]}]
+    lappend cands [file join $sdk candidates groovy current bin groovy]
+    foreach c $cands {
+        if {[file executable $c]} {
+            # o script groovy precisa do java: o do SDKMAN, se não houver outro
+            set java [file join $sdk candidates java current]
+            if {![info exists ::env(JAVA_HOME)] && [auto_execok java] eq "" && [file isdirectory $java]} {
+                set ::env(JAVA_HOME) $java
+            }
+            return [list $c]
+        }
+    }
+    return ""
+}
+
+qc::template groovy Script {// Script Groovy -- Ctrl+R executa; argumentos em Executar > Opções (Ctrl+E).
+// Dependências: @Grab('org.apache.commons:commons-lang3:3.17.0')
+
+String saudacao(String nome) { "Olá, ${nome}!" }
+
+println saudacao('mundo')
+
+def quadrados = (1..5).collect { it * it }
+println "Quadrados: $quadrados (soma ${quadrados.sum()})"
+
+def pessoas = [[nome: 'Ana', idade: 31], [nome: 'Bruno', idade: 25]]
+pessoas.sort { it.idade }.each { p ->
+    println "${p.nome.padRight(6)} ${p.idade}"
+}
+
+args.eachWithIndex { a, i -> println "args[$i] = $a" }
+}
+
+qc::template groovy "Script com @Grab" {// Dependências do Maven Central com @Grab (Grape). Na 1ª execução elas são
+// baixadas para ~/.groovy/grapes, o que demora um pouco; depois vêm do cache.
+// Para ver o download: Executar > Opções (Ctrl+E) > -Dgroovy.grape.report.downloads=true
+//
+// Outras anotações úteis:
+//   @GrabResolver(name = 'meu-repo', root = 'https://repo.exemplo.com/maven2/')
+//   @GrabExclude('commons-io:commons-io')        // tira uma dependência transitiva
+//   @GrabConfig(systemClassLoader = true)        // drivers JDBC (DriverManager)
+@Grapes([
+    @Grab('org.apache.commons:commons-csv:1.14.0'),
+    @Grab(group = 'org.apache.commons', module = 'commons-lang3', version = '3.17.0'),
+])
+import org.apache.commons.csv.CSVFormat
+import org.apache.commons.lang3.StringUtils
+
+def csv = '''
+nome,cidade,idade
+ana souza,recife,31
+bruno lima,porto alegre,25
+carla dias,belém,42
+'''.trim()
+
+def formato = CSVFormat.DEFAULT.builder()
+    .setHeader()
+    .setSkipHeaderRecord(true)
+    .get()
+
+def registros = formato.parse(new StringReader(csv)).toList()
+registros.sort { it.get('idade') as int }.each { r ->
+    def nome = StringUtils.capitalize(r.get('nome'))
+    def cidade = StringUtils.abbreviate(r.get('cidade'), 10)
+    println "${nome.padRight(12)} ${cidade.padRight(10)} ${r.get('idade')}"
+}
+println "Média de idade: ${registros*.get('idade')*.toInteger().average()}"
+}
+
+qc::template groovy "Classe com main" {// Groovy @VERSION@
+import groovy.transform.CompileStatic
+
+@CompileStatic
+class Main {
+    static void main(String[] args) {
+        List<Integer> xs = [3, 1, 2]
+        println "Ordenado: ${xs.sort()}"
+    }
+}
+}
+
 # --- Scheme (Guile, Chez) --------------------------------------------------
 
 qc::language scheme {
@@ -8077,14 +8865,14 @@ qc::language scheme {
     words {
         keyword {
             define define* define-syntax define-record-type define-values
-            define-module define-library lambda lambda* case-lambda named-lambda
+            define-library lambda lambda* case-lambda named-lambda
             let let* letrec letrec* let-values let*-values let-syntax
             letrec-syntax if cond case else when unless begin do set! quote
             quasiquote unquote unquote-splicing and or syntax-rules syntax-case
             with-syntax identifier-syntax import library export guard
             parameterize delay delay-force force call/cc
             call-with-current-continuation dynamic-wind receive assert
-            use-modules module fluid-let include cond-expand =>
+            module fluid-let include cond-expand =>
         }
         builtin {
             car cdr cons list cadr cddr caar cdar caddr cdddr append reverse length
@@ -8130,6 +8918,13 @@ qc::language scheme {
          args {%O --script %F %A} versionRe {([0-9]+\.[0-9][0-9.]*)}
          optsHint "--libdirs ./lib   --optimize-level 2"
          errPatterns {{line ([0-9]+), char ([0-9]+) of %F}} col0 0}
+        {name kawa label Kawa exe {kawa} args {%O %F %A}
+         versionRe {Kawa ([0-9][0-9.]*)}
+         searchHint "kawa (PATH)"
+         optsHint "--r7rs   --full-tailcalls   -Dkawa.import.path=./lib/*.scm"
+         errPatterns {{%F:([0-9]+):([0-9]+):} {\(%F:([0-9]+)\)}} col0 0
+         warnRe {^\S+:[0-9]+:[0-9]+: warning - }
+         infoRe {^\s+at (?:gnu\.|kawa\.|java\.|jdk\.|sun\.)|^\s+\.\.\. [0-9]+ more|^Picked up JAVA_TOOL_OPTIONS:|^;; }}
     }
     linters {
         {name guild label "guild compile" runner guile exe {guild guild3.0}
@@ -8185,6 +8980,12 @@ qc::language scheme {
            #f
            (lambda (c) (when (unbound? c) (report c) (exit 1))))))
          }}
+        {name kawa-lint label "Kawa (compile)" runner kawa useRunner 1
+         args {--warn-undefined-variable --warn-unreachable --warn-void-used
+               --warn-uninitialized %O -d %D/classes -C %F}
+         optsKeep {--r7rs 0 --scheme 0 --full-tailcalls 0 --no-full-tailcalls 0}
+         errPatterns {{%F:([0-9]+):([0-9]+):}} col0 0
+         warnRe {: warning - } errRe {.} ignoreRe {^\(compiling }}
     }
 }
 
@@ -8192,11 +8993,11 @@ qc::language scheme {
 # módulos .scm, achados a partir do executável (<prefixo>/share/guile/<versão>).
 proc qc::lang::scheme::apiSources {} {
     set rn ""
-    foreach r [::qc::lget runners scheme] {
+    foreach r [::qc::lget runners guile] {
         if {[dict get $r name] eq "guile"} {set rn $r}
     }
     if {$rn eq ""} {return {}}
-    set exe [lindex [::qc::findExe $rn scheme] 0]
+    set exe [lindex [::qc::findExe $rn guile] 0]
     if {$exe eq ""} {return {}}
     for {set i 0} {$i < 10 && [file type $exe] eq "link"} {incr i} {
         set exe [file normalize [file join [file dirname $exe] [file readlink $exe]]]
@@ -8282,7 +9083,8 @@ namespace eval qc::lang::scheme {
         with-mutex 1 dynamic-wind 3 when 1 unless 1 library 1 module 1
         parameterize 1 guard 1 receive 2 fluid-let 1 match 1 match-lambda 0
         match-lambda* 0 match-let 1 match-let* 1 eval-when 1 while 1
-        unwind-protect 1
+        unwind-protect 1 try-catch 1 try-finally 1 synchronized 1
+        object 1 reset 0 shift 1 async 0 trace-lambda 1 trace-let 1
     }
 }
 
@@ -8472,6 +9274,224 @@ proc qc::lang::scheme::reformat {text} {
     }
     return [join $out \n]
 }
+
+# --- Implementações de Scheme -------------------------------------------------
+# Chez, Guile e Kawa usam as mesmas extensões: cada uma é uma linguagem
+# própria no combo (scheme-chez, scheme-guile, scheme-kawa), derivada da
+# "scheme" acima (que não aparece na lista), com só o seu runner, o seu
+# linter e as suas palavras. Ao abrir um arquivo, a implementação vem do
+# hook detect (cabeçalho do Emacs/Geiser, shebang ou o próprio código); sem
+# indicação, fica a primeira instalada, nesta ordem.
+
+namespace eval qc::lang::scheme {
+    # id -> rótulo runner palavras-extras defWords-extras
+    variable dialects {
+        scheme-chez {
+            name "Scheme (Chez)" runner chez
+            words {
+                keyword {
+                    define-ftype foreign-procedure foreign-callable
+                    trace-define trace-lambda trace-let trace untrace time
+                    record-case define-property meta
+                }
+                builtin {
+                    load-shared-object printf fprintf pretty-print
+                    ftype-ref ftype-set! ftype-pointer-address
+                    make-ftype-pointer foreign-alloc foreign-free foreign-ref
+                    foreign-set! foreign-sizeof
+                }
+            }
+            defWords {define-ftype trace-define define-property}
+        }
+        scheme-guile {
+            name "Scheme (Guile)" runner guile
+            words {
+                keyword {
+                    define-module use-modules define-public define-syntax-rule
+                    eval-when with-fluids define-once
+                }
+                builtin {}
+            }
+            defWords {define-public define-syntax-rule define-once}
+        }
+        scheme-kawa {
+            name "Scheme (Kawa)" runner kawa
+            words {
+                keyword {
+                    define-simple-class define-class define-alias
+                    define-constant define-private define-variable define-enum
+                    define-macro defmacro define-early-constant
+                    define-namespace define-private-alias module-name
+                    module-export module-static module-compile-options require
+                    try-catch try-finally synchronized object this future lazy
+                    include-relative include-ci
+                    reset shift async
+                    define-foreign-procedure define-foreign-struct
+                    trace untrace time
+                }
+                builtin {
+                    invoke invoke-static invoke-special field static-field
+                    slot-ref instance? as make primitive-throw runnable eager
+                    force* make-promise promise-set-value!
+                    promise-set-exception! promise-set-alias!
+                    promise-set-thunk!
+                    call-with-reset call-with-shift make-coroutine-generator
+                    generator->list with-effect-handler perform await
+                    foreign-library foreign-procedure foreign-callback
+                    foreign-alloc foreign-ref foreign-set! foreign-sizeof
+                    foreign-struct foreign-struct-ref foreign-struct-set!
+                    string->pointer pointer->string foreign-null?
+                    disassemble
+                }
+                constant {foreign-null}
+            }
+            defWords {
+                define-simple-class define-class define-alias define-constant
+                define-private define-variable define-enum define-macro
+                defmacro define-early-constant define-private-alias
+                define-foreign-procedure define-foreign-struct
+            }
+            tokens {
+                constant {#!(?:optional|rest|key|eof|void|null|default|fold-case|no-fold-case)\M}
+            }
+        }
+    }
+    # nome usado no cabeçalho/shebang -> id
+    variable dialectNames {
+        chez scheme-chez chezscheme scheme-chez petite scheme-chez
+        scheme scheme-chez scheme-script scheme-chez
+        guile scheme-guile kawa scheme-kawa
+    }
+}
+
+# Implementação indicada no arquivo, ou "":
+#   ;; -*- mode: scheme; geiser-scheme: kawa -*-    (1ª ou 2ª linha, Emacs)
+#   ;; Local Variables: ... geiser-scheme: guile ... ;; End:   (no fim)
+#   #!/usr/bin/env guile  |  #!/usr/bin/scheme --script  |  #!/usr/bin/env kawa
+# ou, sem isso, pistas no código: (use-modules ...)/(ice-9 ...) = Guile,
+# (chezscheme) = Chez, (kawa ...), define-simple-class, module-name = Kawa.
+proc qc::lang::scheme::detect {data path} {
+    variable dialectNames
+    set lines [split [string range $data 0 2000] \n]
+    foreach l [lrange $lines 0 1] {
+        if {[regexp -nocase -- {-\*-.*\mgeiser-scheme:\s*([-\w]+)} $l -> v]} {
+            return [dialectOf $v]
+        }
+    }
+    set tail [string range $data end-3000 end]
+    if {[regexp -nocase {Local Variables:.*\mgeiser-scheme:\s*([-\w]+)} $tail -> v]} {
+        return [dialectOf $v]
+    }
+    if {[regexp {^#!\s*(\S+)(?:[ \t]+(?:-S[ \t]+)?(\S+))?} [lindex $lines 0] -> p1 p2]} {
+        set prog [file tail $p1]
+        if {$prog eq "env"} {set prog [file tail $p2]}
+        regsub {[0-9.]+$} $prog {} prog
+        set id [dialectOf $prog]
+        if {$id ne ""} {return $id}
+    }
+    set code [string range $data 0 20000]
+    if {[regexp {\((?:use-modules|define-module)\M|\(ice-9 } $code]} {return scheme-guile}
+    if {[regexp {\(chezscheme\)} $code]} {return scheme-chez}
+    if {[regexp {\(kawa [-\w]+\)|\((?:define-simple-class|module-name|define-alias)\M} $code]} {
+        return scheme-kawa
+    }
+    return ""
+}
+
+proc qc::lang::scheme::dialectOf {name} {
+    variable dialectNames
+    set name [string tolower $name]
+    if {[dict exists $dialectNames $name]} {return [dict get $dialectNames $name]}
+    if {$name in $::qc::langs} {return $name}
+    return ""
+}
+
+# Linguagem > Indicar implementação no arquivo: grava (ou atualiza) o
+# cabeçalho -*- geiser-scheme: ... -*- na 1ª linha (2ª, após um shebang).
+proc qc::lang::scheme::writeHeader {} {
+    variable dialects
+    set id $::qc::lang
+    if {![dict exists $dialects $id]} {
+        set ::qc::status "A linguagem atual não é uma implementação de Scheme"
+        return
+    }
+    set r [dict get $dialects $id runner]
+    set w $::qc::ed
+    set ln 1
+    if {[$w get 1.0 1.2] eq "#!"} {set ln 2}
+    set l [$w get $ln.0 "$ln.0 lineend"]
+    if {[regexp -indices -nocase {(\mgeiser-scheme:\s*)([-\w]+)} $l -> - v]} {
+        lassign $v a b
+        $w replace $ln.$a $ln.[incr b] $r
+    } elseif {[regexp -indices -- {-\*-(.*?)-\*-} $l -> body]} {
+        lassign $body a b
+        set vars [string trimright [string trim [string range $l $a $b]] ";"]
+        if {$vars ne ""} {append vars ";"}
+        $w replace $ln.$a $ln.[incr b] " [string trimleft "$vars geiser-scheme: $r"] "
+    } else {
+        $w insert $ln.0 ";; -*- mode: scheme; geiser-scheme: $r -*-\n"
+    }
+    ::qc::highlight
+    set ::qc::status "Cabeçalho gravado: geiser-scheme: $r"
+}
+
+# Configurações antigas de "scheme" passam para cada implementação.
+proc qc::lang::scheme::migrateCfg {} {
+    variable dialects
+    upvar #0 ::qc::cfg cfg
+    set old [expr {[info exists cfg(runner.scheme)] ? $cfg(runner.scheme) : ""}]
+    foreach {id spec} $dialects {
+        set r [dict get $spec runner]
+        foreach k [list fmtsave exe.$r opts args] {
+            if {$k in {opts args} && $old ne $r} {continue}
+            if {[info exists cfg($k.scheme)] && ![info exists cfg($k.$id)]} {
+                set cfg($k.$id) $cfg($k.scheme)
+            }
+        }
+    }
+    if {[info exists cfg(lang)] && $cfg(lang) eq "scheme"} {
+        set cfg(lang) [::qc::langAlias scheme]
+    }
+}
+
+# Registra as implementações (depois de todos os hooks da "scheme").
+apply {{} {
+    upvar #0 ::qc::lang::scheme::dialects dialects
+    set base $::qc::L(scheme)
+    foreach {id spec} $dialects {
+        set d $base
+        set r [dict get $spec runner]
+        dict set d name [dict get $spec name]
+        dict set d runners [lmap x [dict get $base runners] {
+            if {[dict get $x name] ne $r} continue
+            set x
+        }]
+        dict set d linters [lmap x [dict get $base linters] {
+            if {[dict exists $x runner] && [dict get $x runner] ne $r} continue
+            set x
+        }]
+        set words [dict get $base words]
+        dict for {tag list} [dict get $spec words] {
+            dict lappend words $tag {*}$list
+        }
+        dict set d words $words
+        dict lappend d defWords {*}[dict get $spec defWords]
+        if {[dict exists $spec tokens]} {
+            # antes dos números (tokens é lista: chaves repetidas)
+            set tk [dict get $base tokens]
+            set i [lsearch -exact -start 0 [lmap {k v} $tk {set k}] number]
+            dict set d tokens [linsert $tk [expr {2 * $i}] {*}[dict get $spec tokens]]
+        }
+        ::qc::language $id $d
+        foreach p [info procs ::qc::lang::scheme::*] {
+            set n [namespace tail $p]
+            if {$n eq "apiSources" && $r ne "guile"} {continue}
+            interp alias {} ::qc::lang::${id}::$n {} $p
+        }
+    }
+    # "scheme" fica só como base (e apelido: ver qc::langAlias)
+    set ::qc::langs [lsearch -all -inline -not -exact $::qc::langs scheme]
+}}
 
 # --- OCaml / OxCaml ----------------------------------------------------------
 
@@ -8726,6 +9746,9 @@ proc qc::main {argv} {
     variable cfg
     loadLanguageFiles
     loadCfg
+    if {[info commands ::qc::lang::scheme::migrateCfg] ne ""} {
+        catch {::qc::lang::scheme::migrateCfg}
+    }
     set id ""
     set path ""
     for {set i 0} {$i < [llength $argv]} {incr i} {
@@ -8741,8 +9764,9 @@ proc qc::main {argv} {
     set names {}
     foreach l $langs {lappend names [lget name $l]}
     .tb.lang configure -values $names
-    if {$id eq "" && $path ne ""} {set id [langForFileAny $path]}
-    if {$id eq "" || $id ni $langs} {set id $cfg(lang)}
+    if {$id eq "" && $path ne "" && [file isfile $path]} {set id [langForFile $path]}
+    if {$id ne ""} {set id [langAlias $id]}
+    if {$id eq "" || $id ni $langs} {set id [langAlias $cfg(lang)]}
     if {$id eq "" || $id ni $langs} {set id [lindex $langs 0]}
     setLang $id
     if {$path ne "" && [file isdirectory $path]} {
@@ -8762,6 +9786,12 @@ proc qc::main {argv} {
         set cur $cfg(tabcur)
         foreach f $cfg(tabs) {
             if {[file isfile $f]} {openFile $f}
+        }
+        # abas que estavam desacopladas
+        foreach fl $cfg(floats) {
+            lassign $fl f geom
+            set w [tabForFile $f]
+            if {$w ne ""} {catch {undock $w $geom}}
         }
         set w [tabForFile $cur]
         if {$w ne ""} {activateTab $w}

@@ -99,7 +99,8 @@ pode ser interrompida a qualquer momento.
 |-----------|-----------|-----------------|
 | Tcl/Tk    | `.tcl .tk .tm .test` | `tclsh` (de preferência o da mesma instalação do `wish`) |
 | Scala 3   | `.sc .scala` | `scala`, `scala-cli` |
-| Scheme    | `.scm .ss .sls .sps .sld` | Guile, Chez Scheme |
+| Groovy    | `.groovy .gvy .gy .gsh .gradle` | `groovy` (PATH, `GROOVY_HOME` ou SDKMAN) |
+| Scheme (Chez), (Guile), (Kawa) | `.scm .ss .sls .sps .sld` | `scheme`/`petite`, `guile`, `kawa` |
 | OCaml     | `.ml .mli .mlx` | `ocaml`, OxCaml (switch do opam) |
 | Shell     | `.sh .bash .zsh .ksh` | `bash`, `sh`, `zsh`, `dash` |
 | Markdown  | `.md .markdown .mkd .mdown` | — (Ctrl+R pré-visualiza) |
@@ -112,8 +113,46 @@ Detalhes por linguagem:
 - **Scala 3** — detecta se o código é um script (`.sc`, instruções soltas) ou
   um fonte com `@main`/`def main`/`extends App` (`.scala`). Há modelos para
   JVM, Scala.js e Scala Native usando diretivas `//> using` do scala-cli.
-- **Scheme** — indentação no estilo Lisp. No Guile o código é compilado antes
-  de rodar, para que os erros tragam linha e coluna.
+- **Groovy** — destaque de GStrings (`${...}` e `$nome`), strings
+  `"""`/`'''`, slashy (`~/re/`) e dollar-slashy (`$/.../$`), anotações e
+  nomes de métodos declarados com tipo (`String nome(`), que também entram no
+  F12. Cobre a sintaxe até o Groovy 6: `val`, `record`, `sealed`/`non-sealed`/
+  `permits`, `switch` com `->`/`yield`, `async`/`await`. As palavras-chave
+  contextuais só são destacadas em posição de palavra-chave (`def val = 5` e
+  `record.a` continuam nomes comuns); em `val String s`, `s` é o nome definido.
+  Na desestruturação (`def (a, b) = lista`, `val (int x, String s) = rec`,
+  `def (x: a, y: b) = rec`, `def (h, *resto) = lista`) cada nome recebe a cor
+  de definição e entra no F12. Na saída, a pilha de exceções aparece uma vez só (sem o registro
+  duplicado do Groovy 6) e os quadros internos do Groovy/Java ficam em cinza.
+  Fora do `PATH`, o `groovy` é procurado em `GROOVY_HOME` e no SDKMAN. Há
+  modelos de script, de script com `@Grab` (dependências do Maven Central) e
+  de classe com `main`. Se um `@Grab` não resolver, a saída aponta (com link)
+  para a linha dele, e o relatório do Ivy fica em cinza.
+- **Scheme** — Chez, Guile e Kawa aparecem separados no combo e no menu
+  Linguagem: cada um tem o seu interpretador, o seu verificador e as suas
+  palavras destacadas. A indentação no estilo Lisp e o formatador são os
+  mesmos. Como os três usam `.scm`, ao abrir um arquivo a implementação vem de:
+  1. cabeçalho do Emacs/Geiser na 1ª linha (ou na 2ª, depois de um shebang):
+     `;; -*- mode: scheme; geiser-scheme: kawa -*-` (`chez`, `guile` ou
+     `kawa`), ou o mesmo `geiser-scheme:` num bloco `Local Variables:` no fim;
+  2. shebang: `#!/usr/bin/env guile`, `#!/usr/bin/env -S kawa`,
+     `#!/usr/bin/scheme --script`;
+  3. pistas no código: `(use-modules …)`/`(ice-9 …)` → Guile,
+     `(chezscheme)` → Chez, `(kawa …)`, `define-simple-class`, `module-name` → Kawa;
+  4. sem nada disso, a primeira instalada na ordem Chez, Guile, Kawa.
+
+  Linguagem > Indicar implementação de Scheme no arquivo grava (ou atualiza) o
+  cabeçalho com a implementação escolhida no combo. O vim não tem convenção
+  para a implementação (só `ft=scheme`), por isso o padrão usado é o do Geiser.
+  No Guile o código é compilado antes de rodar, para que os erros tragam linha
+  e coluna. No Kawa são destacadas as formas próprias (`define-simple-class`,
+  `define-alias`, `try-catch`, `#!optional`…), as continuações delimitadas de
+  `(kawa continuations)` (`reset`, `shift`, `async`/`await`,
+  `make-coroutine-generator`, `with-effect-handler`/`perform`…), o FFI de
+  `(kawa foreign)` (`define-foreign-procedure`, `define-foreign-struct`,
+  `foreign-ref`, `foreign-null`…) e a depuração (`trace`, `untrace`, `time`,
+  `disassemble`). A pilha de exceções Java aponta para a linha do script, e os
+  quadros internos (`gnu.`, `kawa.`, `java.`) e o relatório do `time` ficam em cinza.
 - **Markdown** — o leitor embutido cobre o CommonMark usual e as extensões
   do GitHub mais comuns: títulos (`#` e sublinhados), ênfase, `código`,
   ~~riscado~~, listas (aninhadas, numeradas, de tarefas `- [ ]`), citações,
@@ -133,17 +172,20 @@ Detalhes por linguagem:
 |-----------|-------------------------|----------------|
 | Tcl       | [`tclfmt`](https://github.com/nmoroze/tclint) | [`tclint`](https://github.com/nmoroze/tclint) |
 | Scala 3   | `scala fmt` (scalafmt, baixado pelo Scala CLI) | `scala compile` com `-Wunused:imports,privates,locals -deprecation -feature` |
+| Groovy    | `npm-groovy-lint --format` | `groovyc` (compila sem executar); sem ele, `npm-groovy-lint` |
 | Scheme (Guile) | embutido: reindentação no estilo do Emacs | `guild compile` com avisos de variável não usada/não definida, nº de argumentos, `format`… |
 | Scheme (Chez)  | embutido: reindentação no estilo do Emacs | compilação sem executar: sintaxe, nº de argumentos e identificadores não definidos |
+| Scheme (Kawa)  | embutido: reindentação no estilo do Emacs | `kawa -C` (compila sem executar) com avisos de variável não definida, código inalcançável, `void` usado… |
 | OCaml / OxCaml | `ocamlformat` (ou `ocp-indent`, se não houver) | `ocamlc -c` com os avisos `:standard` do dune |
 
-- O verificador de Scheme segue o interpretador escolhido (Guile ou Chez).
+- O verificador de Scheme segue o interpretador escolhido (cada implementação tem o seu).
 - Editar > Formatar ao salvar (por linguagem, desligado por padrão) formata
   o arquivo a cada salvamento. O formatador embutido do Scheme roda antes de
   gravar; as ferramentas externas rodam em segundo plano depois do Ctrl+S e
   o arquivo é salvo de novo se algo mudar. Se a ferramenta der erro, o
   arquivo fica salvo como estava.
-- `tclint.toml`/`.tclint`, `.scalafmt.conf` e `.ocamlformat` são procurados
+- `tclint.toml`/`.tclint`, `.scalafmt.conf`, `.ocamlformat` e
+  `.groovylintrc.json` são procurados
   da pasta do arquivo para cima e passados à ferramenta. Sem `.ocamlformat`,
   o `ocamlformat` usa o perfil padrão.
 - Em OCaml, as ferramentas são procuradas primeiro na pasta do interpretador
@@ -152,14 +194,15 @@ Detalhes por linguagem:
   só `-I`, `-w`, `-alert`, `-open`, `-ppx`, `-rectypes`, `-extension`… (não os
   `.cma`).
 - As opções do interpretador (Ctrl+E) valem também para `scala compile` e
-  para o Chez; no `guild`, só `-L`, `-x`, `--r6rs` e `--r7rs`.
+  para o Chez; no `guild`, só `-L`, `-x`, `--r6rs` e `--r7rs`; no `kawa -C`,
+  só `--r7rs`, `--scheme` e `--[no-]full-tailcalls`.
 - `tclint`/`tclfmt`: `pip install tclint`. Para usar outro executável, defina
   `exe.<nome>.<linguagem>` em `~/.qconsolerc` (ex.: `exe.tclint.tcl`).
 
 ## Uso
 
 ```sh
-wish tcode.tcl ?-lang tcl|scala|scheme|ocaml|shell? ?arquivo?
+wish tcode.tcl ?-lang tcl|scala|scheme|scheme-chez|scheme-guile|scheme-kawa|ocaml|shell? ?arquivo?
 ```
 
 Ou, com permissão de execução:
