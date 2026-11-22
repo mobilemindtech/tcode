@@ -3737,6 +3737,11 @@ proc qc::multiKey {K A s} {
         [string match *_L $K] || [string match *_R $K]
         || $K in {Caps_Lock Num_Lock ISO_Level3_Shift Mode_switch Multi_key}
     } {return}
+    if {($s & 0x0C) == 4 && $K in {Left Right}} {
+        # Ctrl+←/→ (com Shift, seleciona): palavra a palavra, em cada cursor
+        multiApply [list qc::moveCaret Word$K [expr {$s & 1}]]
+        return -code break
+    }
     if {$s & 0x0C} {
         # Ctrl+D continua adicionando, Ctrl+V cola em todos (via qc::paste),
         # Ctrl+S/R não mexem no texto; o resto volta a um cursor só
@@ -3785,6 +3790,14 @@ proc qc::moveCaret {k {shift 0}} {
             [$ed compare sel.last == "sel.last linestart"]
             && [$ed compare sel.first < sel.last]
         } {set to "sel.last -1c"}
+    } elseif {$k eq "WordLeft"} {
+        set to [tk::TextPrevPos $ed insert [prevWordFn]]
+    } elseif {$k eq "WordRight"} {
+        # como no Tk: com Shift, até o fim da palavra
+        set to [expr {
+            $shift && [info commands tk::TextSelectNextWord] ne ""
+            ? [tk::TextSelectNextWord $ed insert] : [tk::TextNextWord $ed insert]
+        }]
     } else {
         set to [dict get {
             Left "insert -1c" Right "insert +1c" Home "insert linestart"
@@ -3794,6 +3807,11 @@ proc qc::moveCaret {k {shift 0}} {
     }
     set to [$ed index $to]
     if {[$ed compare $to > end-1c]} {set to [$ed index end-1c]}
+    # palavra a palavra (vários cursores): não sai da linha, para no
+    # fim/início dela; assim cada cursor continua na sua linha
+    if {$k in {WordLeft WordRight} && [$ed compare "$to linestart" != "$ins linestart"]} {
+        set to [$ed index [expr {$k eq "WordRight" ? "$ins lineend" : "$ins linestart"}]]
+    }
     set anchor $ins
     if {$hasSel} {
         set f [$ed index sel.first]
@@ -3809,6 +3827,12 @@ proc qc::moveCaret {k {shift 0}} {
         }
     }
     $ed mark set insert $to
+}
+
+# Início da palavra anterior: tk::startOfPreviousWord (Tk 9) ou a do Tcl.
+proc qc::prevWordFn {} {
+    if {[info commands ::tk::startOfPreviousWord] ne ""} {return tk::startOfPreviousWord}
+    return tcl_startOfPreviousWord
 }
 
 # Home "inteligente": vai ao primeiro caractere não branco da linha; se o
