@@ -18,6 +18,9 @@ pode ser interrompida a qualquer momento.
 
 - Destaque de sintaxe, números de linha, realce da linha atual e de pares de
   parênteses/chaves/colchetes
+- Guias de coluna: linhas verticais nas colunas 80 e 120 (Exibir > Guias de
+  coluna liga/desliga; Exibir > Colunas das guias… muda as colunas) e guias de
+  indentação, uma por nível (Exibir > Guias de indentação)
 - Parênteses coloridos por nível de aninhamento ("rainbow") em Scheme, Tcl e
   OCaml; os que ficam sem par (ou com o par trocado, ex.: `(]`) em vermelho
 - Em Scheme, `define` e `lambda` aparecem como `λ` (só na tela: o arquivo não muda; a

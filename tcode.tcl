@@ -110,6 +110,7 @@ namespace eval qc {
         lastdir "" lang "" folder "" sidebar 0 sidew 240 autocomp 1
         terminal 0 termpos side termcmd "" tabs {} tabcur "" hoverdef 1
         pretty 1 mdpreview 1 mdw 0 recentdirs {} floats {}
+        rulers {80 120} rulerson 1 indentguides 1
     }
     variable T ;# terminal embutido: T(chan), T(pid), T(shown)
     array set T {}
@@ -125,7 +126,8 @@ namespace eval qc {
         bbad     #7a2e2e   errline  #52302f   warnline #49442c
         conbg    #1e1f22   confg    #c8c8c8
         stderr   #ff6b68   warn     #e0c46c   info     #6f7f8f
-        result   #8fbf6a   thumbact #64666d
+        result   #8fbf6a   thumbact #64666d   ruler    #3a3b40
+        indguide #34353a   indguideact #6b6d74
     }
     # Tags de destaque de sintaxe: cor e estilo (B negrito, I itálico)
     variable S {
@@ -658,6 +660,10 @@ proc qc::buildMenus {} {
     $m add command -label "Fonte padrão" -accelerator Ctrl+0 -command {qc::zoom 0}
     $m add separator
     $m add checkbutton -label "Quebra de linha" -variable ::qc::cfg(wrap) -command qc::applyWrap
+    $m add checkbutton -label "Guias de coluna" -variable ::qc::cfg(rulerson) -command qc::applyRulers
+    $m add command -label "Colunas das guias…" -command qc::rulersDialog
+    $m add checkbutton -label "Guias de indentação" -variable ::qc::cfg(indentguides) \
+        -command qc::applyRulers
     $m add separator
     $m add command -label "Recolher bloco" -accelerator Ctrl+Shift+\[ -command qc::foldCursor
     $m add command -label "Expandir bloco" -accelerator Ctrl+Shift+\] -command qc::unfoldCursor
@@ -2107,7 +2113,295 @@ proc qc::drawGutter {{ed ""}} {
         place forget $ed.fd$nl
         incr nl
     }
+    drawRulers $ed
+    drawIndentGuides $ed
     if {$main} {drawPretty}
+}
+
+# --- guias de coluna (cfg(rulers)) -----------------------------------------
+# Linhas verticais finas sobre o editor, redesenhadas junto com a margem
+# (rolagem, zoom, redimensionamento). A posição vem do x da linha exibida no
+# topo (negativo quando rolado na horizontal) + coluna * largura do caractere.
+proc qc::drawRulers {ed} {
+    variable cfg
+    set i 0
+    if {$cfg(rulerson) && [set d [$ed dlineinfo @0,0]] ne ""} {
+        set x0 [lindex $d 0]
+        set cw [font measure QcMono 0]
+        set left [expr {[$ed cget -padx] + [$ed cget -bd]}]
+        set wd [winfo width $ed]
+        foreach c $cfg(rulers) {
+            if {![string is integer -strict $c] || $c < 1} {continue}
+            set x [expr {$x0 + $c * $cw}]
+            if {$x < $left || $x >= $wd} {continue}
+            set l $ed.rl$i
+            if {![winfo exists $l]} {
+                frame $l -width 1 -bd 0 -highlightthickness 0 -cursor xterm \
+                    -background $::qc::C(ruler)
+                bindtags $l [list $l QcRuler QcPretty]
+            }
+            place $l -x $x -y 0 -width 1 -relheight 1
+            # abaixo dos símbolos, cursores extras e marcadores de bloco
+            lower $l
+            incr i
+        }
+    }
+    while {[winfo exists $ed.rl$i]} {
+        place forget $ed.rl$i
+        incr i
+    }
+}
+
+# --- guias de indentação (cfg(indentguides)) ------------------------------
+# Uma linha vertical em cada nível de indentação (colunas 0, n, 2n... com n =
+# "indent" da linguagem) nas linhas indentadas além dele. Linhas em branco
+# valem como a menor indentação entre a linha não vazia anterior e a
+# seguinte, para a guia não se partir no meio do bloco. Trechos seguidos do
+# mesmo nível viram um só frame.
+proc qc::lineIndent {s tw} {
+    if {[string is space $s]} {return -1}
+    set lead [string range $s 0 [expr {[string length $s] \
+        - [string length [string trimleft $s " \t"]] - 1}]]
+    if {[string first \t $lead] < 0} {return [string length $lead]}
+    set ind 0
+    foreach c [split $lead ""] {
+        set ind [expr {$c eq "\t" ? ($ind / $tw + 1) * $tw : $ind + 1}]
+    }
+    return $ind
+}
+
+proc qc::drawIndentGuides {ed} {
+    variable cfg
+    set n 0
+    if {$cfg(indentguides)} {
+        set id [expr {[info exists ::qc::TB($ed,lang)] ? $::qc::TB($ed,lang) : ""}]
+        # na abertura o editor pode ser desenhado antes de ter linguagem
+        if {[catch {lget indent $id} tw] || ![string is integer -strict $tw] || $tw < 1} {
+            set tw 4
+        }
+        # linhas visíveis: {indentação yTopo yBase}
+        set rows {}
+        set x0 ""
+        set bot [$ed index "@0,[winfo height $ed]"]
+        set i [$ed index "@0,0 linestart"]
+        while {[$ed compare $i <= $bot]} {
+            set e [foldEndAt $ed $i]
+            if {$e ne "" && [$ed compare $e > $i]} {
+                set i [$ed index "$e linestart"]
+                if {[$ed compare $e != "$e linestart"]} {set i [$ed index "$i +1 line"]}
+                continue
+            }
+            set d [$ed dlineinfo $i]
+            if {$d eq "" && ![llength $rows]} {set d [$ed dlineinfo @0,0]}
+            if {$d ne ""} {
+                if {$x0 eq ""} {set x0 [lindex $d 0]}
+                set y [lindex $d 1]
+                set dl [$ed dlineinfo "$i lineend"]
+                if {$dl eq ""} {set dl $d}
+                set yb [expr {[lindex $dl 1] + [lindex $dl 3]}]
+                set lastN [lindex [split $i .] 0]
+                lappend rows [list [lineIndent [$ed get $i "$i lineend"] $tw] $y $yb $lastN]
+            }
+            set nx [$ed index "$i +1 line"]
+            if {[$ed compare $nx == $i] || [$ed compare $nx >= end]} {break}
+            set i $nx
+        }
+        if {[llength $rows] && $x0 ne ""} {
+            # linhas em branco: menor indentação entre a anterior e a seguinte
+            # (procurando fora da área visível, até 200 linhas)
+            set first [lindex [split [$ed index "@0,0 linestart"] .] 0]
+            set last [lindex [split [$ed index "end-1c"] .] 0]
+            set prev 0
+            for {set k [expr {$first - 1}]} {$k >= max(1, $first - 200)} {incr k -1} {
+                set v [lineIndent [$ed get $k.0 "$k.0 lineend"] $tw]
+                if {$v >= 0} {set prev $v; break}
+            }
+            set lastVis [expr {$lastN + 1}]
+            set next 0
+            for {set k $lastVis} {$k <= min($last, $lastVis + 200)} {incr k} {
+                set v [lineIndent [$ed get $k.0 "$k.0 lineend"] $tw]
+                if {$v >= 0} {set next $v; break}
+            }
+            set nr [llength $rows]
+            set after [lrepeat $nr $next]
+            for {set k [expr {$nr - 1}]} {$k >= 0} {incr k -1} {
+                lset after $k $next
+                set v [lindex $rows $k 0]
+                if {$v >= 0} {set next $v}
+            }
+            set ind {}
+            set maxi 0
+            set k 0
+            foreach r $rows {
+                set v [lindex $r 0]
+                if {$v < 0} {
+                    set v [expr {min($prev, [lindex $after $k])}]
+                } else {
+                    set prev $v
+                }
+                lappend ind $v
+                set maxi [expr {max($maxi, $v)}]
+                incr k
+            }
+            lassign [activeIndentGuide $ed $tw $last] ac ba bb
+            set cw [font measure QcMono 0]
+            set left [expr {[$ed cget -padx] + [$ed cget -bd]}]
+            set wd [winfo width $ed]
+            for {set c 0} {$c < $maxi} {incr c $tw} {
+                set x [expr {$x0 + $c * $cw}]
+                if {$x < $left} {continue}
+                if {$x >= $wd} {break}
+                set y0 ""
+                foreach r [concat $rows {{}}] v [concat $ind -1] {
+                    if {$v > $c} {
+                        if {$y0 eq ""} {
+                            set y0 [lindex $r 1]
+                            set la [lindex $r 3]
+                        }
+                        set y1 [lindex $r 2]
+                        set lb [lindex $r 3]
+                        continue
+                    }
+                    if {$y0 ne ""} {
+                        set act [expr {$c == $ac && $la <= $bb && $lb >= $ba}]
+                        indentGuide $ed $n $x $y0 $y1 $act
+                        incr n
+                        set y0 ""
+                    }
+                }
+            }
+        }
+    }
+    while {[winfo exists $ed.ig$n]} {
+        place forget $ed.ig$n
+        incr n
+    }
+}
+
+# Guia do bloco onde está o cursor: {coluna primeira última}, com as linhas
+# do corpo do bloco inteiro (também fora da área visível, para a guia
+# continuar acesa ao rolar). Na linha que abre um bloco (a seguinte é mais
+# indentada) é a guia do corpo dele; nas outras, a do nível mais interno
+# que passa pela linha. Coluna -1: nenhuma.
+proc qc::activeIndentGuide {ed tw last} {
+    lassign [activeIndentCol $ed $tw $last] ac head cl
+    if {$ac < 0} {return {-1 0 0}}
+    # linhas não vazias com indentação <= ac delimitam o bloco
+    set sp [expr {min($ac, 255)}]
+    set nt [expr {min($ac / $tw, 255)}]
+    set pat "^(?:\[ \]{0,$sp}|\t{0,$nt})\\S"
+    if {$head} {
+        set a [expr {$cl + 1}]
+    } else {
+        set h [$ed search -backwards -regexp -- $pat $cl.0 1.0]
+        set a [expr {$h eq "" ? 1 : [lindex [split $h .] 0] + 1}]
+    }
+    set b $last
+    if {$cl < $last} {
+        set e [$ed search -regexp -- $pat [expr {$cl + 1}].0 end]
+        if {$e ne "" && [$ed compare $e > $cl.0]} {set b [expr {[lindex [split $e .] 0] - 1}]}
+    }
+    return [list $ac $a $b]
+}
+
+# {coluna éCabeçalho linhaDoCursor} da guia ativa (coluna -1: nenhuma).
+proc qc::activeIndentCol {ed tw last} {
+    set cl [lindex [split [$ed index insert] .] 0]
+    set ci [lineIndent [$ed get $cl.0 "$cl.0 lineend"] $tw]
+    set ni -1
+    set nl $cl
+    for {set k [expr {$cl + 1}]} {$k <= min($last, $cl + 200)} {incr k} {
+        set v [lineIndent [$ed get $k.0 "$k.0 lineend"] $tw]
+        if {$v >= 0} {
+            set ni $v
+            set nl $k
+            break
+        }
+    }
+    if {$ci < 0} {
+        # linha em branco: vale a menor entre a anterior e a seguinte
+        set pi 0
+        for {set k [expr {$cl - 1}]} {$k >= max(1, $cl - 200)} {incr k -1} {
+            set v [lineIndent [$ed get $k.0 "$k.0 lineend"] $tw]
+            if {$v >= 0} {set pi $v; break}
+        }
+        set ci [expr {min($pi, max($ni, 0))}]
+    } elseif {$ni > $ci} {
+        return [list [expr {$ci / $tw * $tw}] 1 $cl]
+    }
+    if {$ci <= 0} {return [list -1 0 $cl]}
+    return [list [expr {($ci - 1) / $tw * $tw}] 0 $cl]
+}
+
+proc qc::indentGuide {ed n x y0 y1 {act 0}} {
+    set l $ed.ig$n
+    if {![winfo exists $l]} {
+        frame $l -width 1 -bd 0 -highlightthickness 0 -cursor xterm
+        bindtags $l [list $l QcRuler QcPretty]
+    }
+    $l configure -background $::qc::C([expr {$act ? "indguideact" : "indguide"}])
+    place $l -x $x -y $y0 -width 1 -height [expr {max(1, $y1 - $y0)}]
+    lower $l
+}
+
+# clique sobre a guia: cursor no ponto do editor logo abaixo
+bind QcRuler <1> {
+    set ed [winfo parent %W]
+    $ed mark set insert @[expr {[winfo x %W] + %x}],[expr {[winfo y %W] + %y}]
+    $ed tag remove sel 1.0 end
+    focus $ed
+    break
+}
+
+proc qc::applyRulers {} {
+    foreach w $::qc::tabs {
+        if {![winfo exists $w] || ![edVisible $w]} {continue}
+        if {$w eq $::qc::ed} {schedGutter} else {otherGutter $w}
+    }
+}
+
+proc qc::rulersDialog {} {
+    set w .rulercfg
+    if {[winfo exists $w]} {raise $w; focus $w.f.e; return}
+    toplevel $w -background $::qc::C(ui)
+    wm title $w "Guias de coluna"
+    wm transient $w .
+    ttk::frame $w.f -padding 10
+    ttk::label $w.f.l -text "Colunas (separadas por espaço; vazio = nenhuma):"
+    ttk::entry $w.f.e -width 30 -textvariable ::qc::rulerTmp
+    ttk::label $w.f.h -style Status.TLabel -text "ex.: 80 120"
+    ttk::frame $w.f.b
+    ttk::button $w.f.b.ok -text OK -command qc::rulersDialogApply
+    ttk::button $w.f.b.no -text Cancelar -command [list destroy $w]
+    pack $w.f.b.no $w.f.b.ok -side right -padx {6 0}
+    pack $w.f -fill both -expand 1
+    pack $w.f.l -anchor w
+    pack $w.f.e -fill x -pady 4
+    pack $w.f.h -anchor w
+    pack $w.f.b -fill x -pady {8 0}
+    bind $w <Return> qc::rulersDialogApply
+    bind $w <Escape> [list destroy $w]
+    set ::qc::rulerTmp $::qc::cfg(rulers)
+    wm geometry $w +[expr {[winfo rootx .] + 200}]+[expr {[winfo rooty .] + 120}]
+    focus $w.f.e
+    $w.f.e selection range 0 end
+}
+
+proc qc::rulersDialogApply {} {
+    variable cfg
+    set cols {}
+    foreach c [regexp -all -inline {[^\s,;]+} $::qc::rulerTmp] {
+        if {![string is integer -strict $c] || $c < 1} {
+            set ::qc::status "Coluna inválida: $c"
+            bell
+            return
+        }
+        lappend cols [expr {$c}]
+    }
+    destroy .rulercfg
+    set cfg(rulers) [lsort -integer -unique $cols]
+    if {[llength $cfg(rulers)]} {set cfg(rulerson) 1}
+    applyRulers
 }
 
 proc qc::gutterClick {x y} {
@@ -5541,12 +5835,38 @@ proc qc::quit {} {
 proc qc::conAppend {text tag} {
     variable con
     $con configure -state normal
-    $con insert end $text $tag
+    # linhas enormes (saída sem quebra de linha) deixam o widget text muito
+    # lento: quebra a cada 2000 caracteres
+    set col [lindex [split [$con index end-1c] .] 1]
+    $con insert end [wrapLong $text $col 2000] $tag
     # limita o tamanho do console
     set lines [lindex [split [$con index end] .] 0]
     if {$lines > 50000} {$con delete 1.0 [expr {$lines - 40000}].0}
     $con configure -state disabled
-    $con see end
+    # rolar a cada pedaço é caro quando a saída é contínua: uma vez por ciclo
+    variable conSee
+    if {![info exists conSee]} {
+        set conSee 1
+        after idle {unset ::qc::conSee; $::qc::con see end}
+    }
+}
+
+# Quebra os trechos de text que passariam de max caracteres numa linha
+# (col = caracteres já presentes na linha corrente).
+proc qc::wrapLong {text col max} {
+    if {$col + [string length $text] <= $max} {return $text}
+    set out ""
+    foreach seg [split $text \n] {
+        while {$col + [string length $seg] > $max} {
+            set k [expr {max(0, $max - $col)}]
+            append out [string range $seg 0 $k-1] \n
+            set seg [string range $seg $k end]
+            set col 0
+        }
+        append out $seg \n
+        set col 0
+    }
+    return [string range $out 0 end-1]
 }
 
 proc qc::clearConsole {} {
@@ -5710,7 +6030,8 @@ proc qc::run {selOnly} {
 }
 
 proc qc::onStdout {fd} {
-    set data [read $fd]
+    # em blocos: com saída contínua a interface continua respondendo
+    set data [read $fd 65536]
     if {$data ne ""} {
         conAnsi $data stdout
         if {$::qc::R(proj) ne ""} {projScan}
@@ -5758,7 +6079,11 @@ proc qc::conAnsi {data base} {
 }
 
 proc qc::onStderr {er} {
-    while {[gets $er line] >= 0} {
+    # com tempo limitado: um programa que escreve sem parar no stderr
+    # (ex.: recursão infinita com mensagens) não pode prender a interface
+    # neste laço; o que sobrar no canal dispara o evento de novo
+    set t0 [clock milliseconds]
+    while {[clock milliseconds] - $t0 < 30 && [gets $er line] >= 0} {
         if {$::qc::R(proj) ne ""} {
             conAnsi $line\n stderr
             projScan
