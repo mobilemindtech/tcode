@@ -81,6 +81,7 @@ namespace eval qc {
     variable gutPending 0
     variable curPending 0
     variable linkSeq 0
+    variable foldSeq 0 ;# tags fold:N dos blocos recolhidos
     variable mcur {} ;# ids dos cursores extras (multi-cursor)
     variable mseq 0
     variable mlast "" ;# último cursor adicionado com Ctrl+D
@@ -657,6 +658,12 @@ proc qc::buildMenus {} {
     $m add command -label "Fonte padrão" -accelerator Ctrl+0 -command {qc::zoom 0}
     $m add separator
     $m add checkbutton -label "Quebra de linha" -variable ::qc::cfg(wrap) -command qc::applyWrap
+    $m add separator
+    $m add command -label "Recolher bloco" -accelerator Ctrl+Shift+\[ -command qc::foldCursor
+    $m add command -label "Expandir bloco" -accelerator Ctrl+Shift+\] -command qc::unfoldCursor
+    $m add command -label "Recolher tudo" -command qc::foldAll
+    $m add command -label "Expandir tudo" -command qc::unfoldAll
+    $m add separator
     $m add checkbutton -label "Mostrar definição ao passar o mouse" -variable ::qc::cfg(hoverdef) \
         -command qc::tipHide
     $m add checkbutton -label "Símbolos no lugar de palavras (define, lambda → λ)" \
@@ -827,6 +834,8 @@ proc qc::setupBindings {} {
         <Alt-F3>            {focus $::qc::ed; qc::selectAllOcc}
         <Control-l>         qc::gotoDialog
         <Control-F>         qc::formatCode
+        <Control-braceleft> qc::foldCursor
+        <Control-braceright> qc::unfoldCursor
         <F8>                qc::lint
         <F12>               qc::goToDefinition
         <Alt-Left>          qc::navBack
@@ -917,7 +926,9 @@ proc qc::bindGutter {g} {
     bind $g <MouseWheel> {[qc::hostEd [winfo parent %W]] yview scroll [expr {%D > 0 ? -3 : 3}] units}
     catch {bind $g <Button-4> {[qc::hostEd [winfo parent %W]] yview scroll -3 units}}
     catch {bind $g <Button-5> {[qc::hostEd [winfo parent %W]] yview scroll 3 units}}
-    bind $g <1> {qc::activateTab [qc::hostEd [winfo parent %W]]; qc::gutterClick %y}
+    bind $g <1> {qc::activateTab [qc::hostEd [winfo parent %W]]; qc::gutterClick %x %y}
+    bind $g <Enter> {qc::gutHover %W 1}
+    bind $g <Leave> {qc::gutHover %W 0}
 }
 
 # Proxy do widget de texto: detecta qualquer alteração do conteúdo e do
@@ -1612,7 +1623,7 @@ proc qc::runProject {pf name} {
         setEncoding $c
     }
     array set R [list fd $fd er $er open 2 t0 [clock milliseconds] lang $::qc::lang \
-        killed 0 jumped 0 pend "" sgr {} pid [lindex [pid $fd] 0] proj $root]
+        killed 0 pend "" sgr {} pid [lindex [pid $fd] 0] proj $root]
     chan event $fd readable [list qc::onStdout $fd]
     chan event $er readable [list qc::onStderr $er]
     conAppend "▶ [join [list "$name: [dict get $cmds $name]" [file tail $root] \
@@ -1943,6 +1954,7 @@ proc qc::highlight {} {
         ::qc::_edw tag add pel {*}$pe
     }
     unset -nocomplain ::qc::TB($ed,praw)
+    computeFolds $txt
     prettyCursor
     schedGutter
     if {[winfo ismapped [fb]]} {markAll}
@@ -2040,29 +2052,287 @@ proc qc::drawGutter {{ed ""}} {
     $gut delete all
     set last [lindex [split [$ed index end-1c] .] 0]
     set digits [expr {max(3, [string length $last])}]
-    set w [expr {[font measure QcMono [string repeat 9 $digits]] + 18}]
+    # números | coluna dos marcadores de recolher/expandir
+    set w [expr {[font measure QcMono [string repeat 9 $digits]] + 30}]
     if {[$gut cget -width] != $w} {$gut configure -width $w}
     set cur [lindex [split [$ed index insert] .] 0]
+    set folds [expr {[info exists ::qc::TB($ed,folds)] ? $::qc::TB($ed,folds) : {}}]
+    set folded [foldedHeads $ed]
+    set hover [expr {[info exists ::qc::gutHover($gut)] && $::qc::gutHover($gut)}]
+    set k [expr {max(3, [font metrics QcMono -linespace] * 3 / 10)}] ;# meio triângulo
+    set mx [expr {$w - 10}]
+    set dim [blend $C(gutfg) $C(gutbg) 0.55]
+    set nl 0 ;# "⋯" dos blocos recolhidos
     set i [$ed index "@0,0 linestart"]
     if {[$ed dlineinfo $i] eq ""} {set i [$ed index "$i +1 line"]}
     while {[$ed compare $i < end]} {
+        # linhas de um bloco recolhido: pula para depois dele
+        set e [foldEndAt $ed $i]
+        if {$e ne "" && [$ed compare $e > $i]} {
+            set i $e
+            continue
+        }
         set d [$ed dlineinfo $i]
         if {$d eq ""} {break}
         set n [lindex [split $i .] 0]
-        $gut create text [expr {$w - 10}] [lindex $d 1] -anchor ne -text $n \
+        $gut create text [expr {$w - 22}] [lindex $d 1] -anchor ne -text $n \
             -font QcMono -fill [expr {$n == $cur ? $C(gutcur) : $C(gutfg)}]
+        set my [expr {[lindex $d 1] + [lindex $d 3] / 2}]
+        if {[dict exists $folded $n]} {
+            $gut create polygon [expr {$mx - $k / 2}] [expr {$my - $k}] \
+                [expr {$mx + $k / 2 + 1}] $my [expr {$mx - $k / 2}] [expr {$my + $k}] \
+                -fill $C(gutcur) -outline $C(gutcur)
+            set bb [$ed bbox "$n.0 lineend"]
+            if {$bb ne ""} {
+                set l $ed.fd$nl
+                if {![winfo exists $l]} {
+                    label $l -text "⋯" -font QcMono -padx 4 -pady 0 -bd 0 \
+                        -highlightthickness 0 -cursor hand2 \
+                        -foreground $C(gutcur) -background $C(uiactive)
+                    bindtags $l [list $l QcFoldMark QcPretty]
+                }
+                set ::qc::fdLine($l) $n
+                place $l -x [expr {[lindex $bb 0] + 6}] -y [lindex $bb 1] \
+                    -height [lindex $bb 3] -bordermode outside
+                incr nl
+            }
+        } elseif {$hover && [dict exists $folds $n]} {
+            $gut create polygon [expr {$mx - $k}] [expr {$my - $k / 2}] \
+                [expr {$mx + $k}] [expr {$my - $k / 2}] $mx [expr {$my + $k / 2 + 1}] \
+                -fill $dim -outline $dim
+        }
         set i [$ed index "$i +1 line"]
+    }
+    while {[winfo exists $ed.fd$nl]} {
+        place forget $ed.fd$nl
+        incr nl
     }
     if {$main} {drawPretty}
 }
 
-proc qc::gutterClick {y} {
+proc qc::gutterClick {x y} {
     variable ed
     set i [$ed index "@0,$y linestart"]
+    # coluna dos marcadores: recolhe/expande o bloco
+    set g [winfo parent $ed].gut
+    if {$x >= [winfo width $g] - 20} {
+        set n [lindex [split $i .] 0]
+        if {[dict exists [foldedHeads] $n] || ([info exists ::qc::TB($ed,folds)]
+                && [dict exists $::qc::TB($ed,folds) $n])} {
+            foldToggle $n
+            focus $ed
+            return
+        }
+    }
     $ed mark set insert $i
     $ed tag remove sel 1.0 end
     $ed tag add sel $i "$i +1 line"
     focus $ed
+}
+
+# --- recolher/expandir blocos --------------------------------------------
+# Os blocos vêm da indentação: uma linha seguida de linhas mais indentadas
+# (as em branco não contam) abre um bloco que vai até a última delas. Em
+# Markdown, cada título também abre um, até o próximo de nível igual ou
+# maior. TB(<editor>,folds) = dict linha do cabeçalho -> última linha.
+# Um bloco recolhido é uma tag "fold:N" (-elide 1) do começo da linha
+# seguinte ao cabeçalho ao começo da linha seguinte à última: o cabeçalho
+# continua visível (com "⋯" no fim). Cada bloco tem a sua tag, então os
+# internos continuam recolhidos quando o externo é expandido.
+
+proc qc::computeFolds {txt} {
+    variable ed
+    set tw [lget indent]
+    if {![string is integer -strict $tw] || $tw < 1} {set tw 4}
+    set md [expr {$::qc::lang eq "markdown"}]
+    set folds [dict create]
+    set stack {} ;# {linha indentação} dos cabeçalhos abertos
+    set heads {} ;# Markdown: {linha nível} dos títulos abertos
+    set fence 0
+    set last 0 ;# última linha não vazia
+    set n 0
+    foreach ln [split $txt \n] {
+        incr n
+        if {$md} {
+            if {[regexp {^ {0,3}(```|~~~)} $ln]} {
+                set fence [expr {!$fence}]
+            } elseif {!$fence && [regexp {^ {0,3}(#{1,6})(?:[ \t]|$)} $ln -> h]} {
+                set lv [string length $h]
+                while {[llength $heads] && [lindex $heads end 1] >= $lv} {
+                    set s [lindex $heads end 0]
+                    if {$last > $s} {dict set folds $s $last}
+                    set heads [lrange $heads 0 end-1]
+                }
+                lappend heads [list $n $lv]
+            }
+        }
+        if {[string is space $ln]} {continue}
+        set lead [string range $ln 0 [expr {[string length $ln] \
+            - [string length [string trimleft $ln " \t"]] - 1}]]
+        if {[string first \t $lead] < 0} {
+            set ind [string length $lead]
+        } else {
+            set ind 0
+            foreach c [split $lead ""] {
+                set ind [expr {$c eq "\t" ? ($ind / $tw + 1) * $tw : $ind + 1}]
+            }
+        }
+        while {[llength $stack] && [lindex $stack end 1] >= $ind} {
+            set s [lindex $stack end 0]
+            if {$last > $s && ![dict exists $folds $s]} {dict set folds $s $last}
+            set stack [lrange $stack 0 end-1]
+        }
+        lappend stack [list $n $ind]
+        set last $n
+    }
+    foreach e [concat $stack $heads] {
+        set s [lindex $e 0]
+        if {$last > $s && ![dict exists $folds $s]} {dict set folds $s $last}
+    }
+    set ::qc::TB($ed,folds) $folds
+    # blocos recolhidos que a edição desmanchou (não começam/terminam mais
+    # num começo de linha) voltam a aparecer
+    foreach t [foldTags] {
+        set r [::qc::_edw tag ranges $t]
+        lassign $r a b
+        if {[llength $r] != 2 || ![string match *.0 $a] || [::qc::_edw compare $a < 2.0]
+            || (![string match *.0 $b] && [::qc::_edw compare $b < end-1c])} {
+            ::qc::_edw tag delete $t
+        }
+    }
+}
+
+proc qc::foldTags {{w ::qc::_edw}} {
+    lsearch -all -inline -glob [$w tag names] fold:*
+}
+
+# Cabeçalhos recolhidos: dict linha -> tags
+proc qc::foldedHeads {{w ::qc::_edw}} {
+    set d [dict create]
+    foreach t [foldTags $w] {
+        foreach {a b} [$w tag ranges $t] {
+            dict lappend d [expr {[lindex [split $a .] 0] - 1}] $t
+        }
+    }
+    return $d
+}
+
+# Fim (exclusive) do trecho recolhido que contém idx ("" se nenhum).
+proc qc::foldEndAt {w idx} {
+    set end ""
+    foreach t [$w tag names $idx] {
+        if {![string match fold:* $t]} {continue}
+        set b [lindex [$w tag prevrange $t "$idx +1c"] 1]
+        if {$b ne "" && ($end eq "" || [$w compare $b > $end])} {set end $b}
+    }
+    return $end
+}
+
+proc qc::foldLine {n} {
+    variable ed
+    if {![info exists ::qc::TB($ed,folds)] || ![dict exists $::qc::TB($ed,folds) $n]} {return 0}
+    if {[dict exists [foldedHeads] $n]} {return 0}
+    set e [dict get $::qc::TB($ed,folds) $n]
+    set t fold:[incr ::qc::foldSeq]
+    ::qc::_edw tag configure $t -elide 1
+    ::qc::_edw tag add $t [expr {$n + 1}].0 [expr {$e + 1}].0
+    return 1
+}
+
+proc qc::unfoldLine {n} {
+    set d [foldedHeads]
+    if {![dict exists $d $n]} {return 0}
+    foreach t [dict get $d $n] {::qc::_edw tag delete $t}
+    return 1
+}
+
+# Cursor escondido num bloco recolhido: vai para o fim do cabeçalho.
+proc qc::foldFixCaret {} {
+    variable ed
+    while {[set e [foldEndAt ::qc::_edw insert]] ne ""} {
+        set a ""
+        foreach t [::qc::_edw tag names insert] {
+            if {![string match fold:* $t]} {continue}
+            set s [lindex [::qc::_edw tag prevrange $t "insert +1c"] 0]
+            if {$a eq "" || [::qc::_edw compare $s < $a]} {set a $s}
+        }
+        $ed mark set insert "$a -1c"
+    }
+}
+
+proc qc::foldToggle {n} {
+    if {![unfoldLine $n] && [foldLine $n]} {foldFixCaret}
+    schedGutter
+}
+
+# Ctrl+Shift+[: recolhe o bloco mais interno que contém o cursor.
+proc qc::foldCursor {} {
+    variable ed
+    set c [lindex [split [$ed index insert] .] 0]
+    if {![info exists ::qc::TB($ed,folds)]} {return}
+    set done [foldedHeads]
+    set best 0
+    dict for {s e} $::qc::TB($ed,folds) {
+        if {$s <= $c && $c <= $e && $s > $best && ![dict exists $done $s]} {set best $s}
+    }
+    if {$best && [foldLine $best]} {
+        foldFixCaret
+        $ed see insert
+        schedGutter
+    }
+}
+
+# Ctrl+Shift+]: expande o bloco recolhido na linha do cursor.
+proc qc::unfoldCursor {} {
+    variable ed
+    if {[unfoldLine [lindex [split [$ed index insert] .] 0]]} {schedGutter}
+}
+
+proc qc::foldAll {} {
+    variable ed
+    if {![info exists ::qc::TB($ed,folds)]} {return}
+    foreach s [dict keys $::qc::TB($ed,folds)] {foldLine $s}
+    foldFixCaret
+    $ed see insert
+    schedGutter
+}
+
+proc qc::unfoldAll {} {
+    foreach t [foldTags] {::qc::_edw tag delete $t}
+    schedGutter
+}
+
+# Expande os blocos recolhidos que escondem idx (ex.: o cursor foi para
+# dentro de um com Ir para linha ou Localizar).
+proc qc::foldReveal {{idx insert}} {
+    set hit 0
+    foreach t [::qc::_edw tag names $idx] {
+        if {[string match fold:* $t]} {
+            ::qc::_edw tag delete $t
+            set hit 1
+        }
+    }
+    if {$hit} {schedGutter}
+    return $hit
+}
+
+# Clique no "⋯" de um bloco recolhido: expande.
+proc qc::foldMarkClick {l} {
+    if {![info exists ::qc::fdLine($l)]} {return}
+    set e [winfo parent $l]
+    activateTab $e
+    unfoldLine $::qc::fdLine($l)
+    schedGutter
+}
+
+bind QcFoldMark <1> {qc::foldMarkClick %W; break}
+
+# Mouse sobre a margem: mostra os marcadores dos blocos que podem ser
+# recolhidos (os recolhidos aparecem sempre).
+proc qc::gutHover {g on} {
+    set ::qc::gutHover($g) $on
+    set e [hostEd [winfo parent $g]]
+    if {$e eq $::qc::ed} {schedGutter} elseif {$e ne "" && [winfo exists $e]} {otherGutter $e}
 }
 
 proc qc::onChange {} {
@@ -2085,6 +2355,8 @@ proc qc::onCursor {} {
 proc qc::updateCursor {} {
     variable ed
     variable curPending 0
+    # cursor dentro de um bloco recolhido (Ir para linha, Localizar…): expande
+    if {[foldReveal]} {$ed see insert}
     lassign [split [$ed index insert] .] l c
     set ::qc::lncol "Ln $l, Col [expr {$c + 1}]"
     ::qc::_edw tag remove curline 1.0 end
@@ -2364,6 +2636,8 @@ proc qc::indent {in} {
 proc qc::newline {} {
     variable ed
     catch {$ed delete sel.first sel.last}
+    # Enter no fim de um cabeçalho recolhido expande o bloco
+    foldReveal "insert +1c"
     set h [hook newlineIndent]
     if {$h ne ""} {
         # o hook pode tratar o Enter sozinho (return -code break)
@@ -2547,6 +2821,7 @@ proc qc::backspace {} {
     if {[llength [::qc::_edw tag ranges sel]]} {
         $ed delete sel.first sel.last
     } elseif {[$ed compare insert > 1.0]} {
+        foldReveal "insert -1c"
         if {[$ed get "insert -1c" "insert +1c"] in [lget autoPairs]} {
             $ed delete "insert -1c" "insert +1c"
         } else {
@@ -2561,6 +2836,7 @@ proc qc::deleteFwd {} {
     if {[llength [::qc::_edw tag ranges sel]]} {
         $ed delete sel.first sel.last
     } else {
+        foldReveal "insert +1c"
         $ed delete insert
     }
 }
@@ -4967,6 +5243,7 @@ proc qc::confirmDiscard {} {
 proc qc::setContent {data} {
     variable ed
     multiClear
+    foreach t [foldTags] {::qc::_edw tag delete $t}
     $ed delete 1.0 end
     $ed insert 1.0 $data
     $ed edit reset
@@ -5418,7 +5695,7 @@ proc qc::run {selOnly} {
         lineoff $lineoff script $script name $name disp $disp nlines $nlines \
         pats $pats col0 [dict get $d col0] infoRe [dict get $d infoRe] \
         warnRe [dict get $d warnRe] grayInfo [dict get $d grayInfo] \
-        killed 0 jumped 0 pend "" sgr {} pid [lindex [pid $fd] 0] proj "" \
+        killed 0 pend "" sgr {} pid [lindex [pid $fd] 0] proj "" \
         ed $ed]
     chan event $fd readable [list qc::onStdout $fd]
     chan event $er readable [list qc::onStderr $er]
@@ -5585,10 +5862,6 @@ proc qc::linkify {line tag {ctx ::qc::R}} {
         }
         if {$tag eq "stderr" && [winfo exists $R(ed)]} {
             $R(ed) tag add errline $target.0 "$target.0 lineend +1c"
-            if {!$R(jumped)} {
-                set R(jumped) 1
-                $R(ed) see $target.0
-            }
         }
     }
     conAppend [string range $line $pos end]\n $tag
@@ -5816,7 +6089,7 @@ proc qc::toolSetup {ctx sub t code} {
     array set X [list ed $ed tool $t name $name dir $dir code $code lineoff 0 \
         disp [expr {$file eq "" ? $name : [file tail $file]}] \
         nlines [llength [split [string trimright $code \n] \n]] \
-        pats $pats col0 [toolGet $t col0 [lget col0]] jumped 0 \
+        pats $pats col0 [toolGet $t col0 [lget col0]] \
         t0 [clock milliseconds]]
     return $path
 }
@@ -6408,6 +6681,7 @@ proc qc::showShortcuts {} {
         "Esc                   Voltar a um cursor"
         "Ctrl+Shift+D          Duplicar linha"
         "Ctrl+Shift+↑ / ↓      Mover linha para cima / baixo"
+        "Ctrl+Shift+\[ / \]      Recolher / expandir bloco"
         "Ctrl+/                Comentar linhas"
         "Ctrl+Shift+F          Formatar código"
         "F8                    Verificar código (linter)"

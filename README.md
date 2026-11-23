@@ -39,6 +39,13 @@ pode ser interrompida a qualquer momento.
   nome completo, ex.: `tk::TextKeySelect`) com os comentários acima deles, e
   no Guile os procedimentos embutidos (`guile-procedures.txt`, com
   assinatura e documentação) e os `define` dos módulos, com a docstring
+- Recolher/expandir blocos: com o mouse sobre a margem, uma seta aparece
+  ao lado das linhas que abrem um bloco; o clique recolhe (a linha fica
+  com `⋯`, que expande de novo ao ser clicado). Os blocos vêm da indentação
+  (em Markdown, também dos títulos). Ctrl+Shift+[ / Ctrl+Shift+] recolhem o
+  bloco do cursor e expandem o da linha; Exibir > Recolher tudo / Expandir
+  tudo. Levar o cursor para dentro de um bloco recolhido (Ir para linha,
+  Localizar, F12…) o expande
 - Home vai ao primeiro caractere não branco da linha (de novo: coluna 0);
   Shift+Home seleciona até lá
 - Indentação automática por linguagem, Tab/Shift+Tab em blocos, comentar e
@@ -252,6 +259,7 @@ o interpretador, as opções passadas a ele e os argumentos do programa.
 | Esc | Voltar a um cursor só |
 | Ctrl+Shift+D | Duplicar linha |
 | Ctrl+Shift+↑ / ↓ | Mover linha (ou seleção) para cima / baixo |
+| Ctrl+Shift+[ / Ctrl+Shift+] | Recolher o bloco do cursor / expandir o da linha |
 | Ctrl+/ | Comentar/descomentar linhas |
 | Ctrl+Shift+F | Formatar código |
 | F8 | Verificar código (linter) |
