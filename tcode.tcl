@@ -625,7 +625,7 @@ proc qc::buildMenus {} {
     $m add command -label "Substituir…" -accelerator Ctrl+H -command {qc::showFind 1}
     $m add command -label "Localizar próximo" -accelerator F3 -command {qc::findNext 1}
     $m add command -label "Localizar anterior" -accelerator Shift+F3 -command {qc::findNext 0}
-    $m add command -label "Ir para linha…" -accelerator Ctrl+L -command qc::gotoDialog
+    $m add command -label "Ir para linha…" -accelerator Ctrl+G -command qc::gotoDialog
     $m add command -label "Ir para definição" -accelerator F12 -command qc::goToDefinition
     $m add command -label "Voltar" -accelerator Alt+← -command qc::navBack
 
@@ -841,6 +841,7 @@ proc qc::setupBindings {} {
         <F3>                {qc::findNext 1}
         <Shift-F3>          {qc::findNext 0}
         <Alt-F3>            {focus $::qc::ed; qc::selectAllOcc}
+        <Control-g>         qc::gotoDialog
         <Control-l>         qc::gotoDialog
         <Control-F>         qc::formatCode
         <Control-braceleft> qc::foldCursor
@@ -1901,12 +1902,24 @@ proc qc::schedHighlight {} {
 # edições feitas depois (acima ou abaixo), então dá para juntar com min.
 proc qc::hlDirty {w first tail} {
     variable TB
+    set f1 $first
+    set t1 $tail
     if {[info exists TB($w,dirty)]} {
         lassign $TB($w,dirty) f0 t0
         set first [expr {min($f0, $first)}]
         set tail [expr {min($t0, $tail)}]
     }
     set TB($w,dirty) [list [expr {max(1, $first)}] [expr {max(0, $tail)}]]
+    # índice de palavras do autocompletar
+    if {[info exists TB($w,acre)]} {
+        if {[info exists TB($w,acdirty)]} {
+            lassign $TB($w,acdirty) f0 t0
+            set f1 [expr {min($f0, $f1)}]
+            set t1 [expr {min($t0, $t1)}]
+        }
+        set TB($w,acdirty) [list [expr {max(1, $f1)}] [expr {max(0, $t1)}]]
+    }
+    if {$w eq $::qc::ed} {acSched $w}
 }
 
 # Destaque de sintaxe. Os tokens vêm da regex H(re), aplicada em sequência
@@ -3639,8 +3652,8 @@ namespace eval qc {
     variable acMaxSize 1000000
 }
 
-proc qc::acWordRe {} {
-    set tk [lget tokens]
+proc qc::acWordRe {{id ""}} {
+    set tk [lget tokens $id]
     if {[dict exists $tk word]} {return [dict get $tk word]}
     return {[A-Za-z_][A-Za-z0-9_]*}
 }
@@ -3664,6 +3677,91 @@ proc qc::acExtract {text {re ""}} {
     return [lsort -unique $out]
 }
 
+# Índice das palavras de cada buffer, mantido só nas linhas editadas:
+#   TB(<ed>,acln)    lista (uma entrada por linha) das palavras da linha
+#   TB(<ed>,acct)    dict palavra -> nº de ocorrências no buffer
+#   TB(<ed>,acdirty) {primeira cauda}: linhas a refazer, como em hlDirty
+#   TB(<ed>,acre)    regex de palavra com que o índice foi montado
+# É montado em segundo plano (acStep, em etapas) e completado na hora se o
+# popup abrir antes.
+
+proc qc::acLineWords {line re n} {
+    set out {}
+    set all [regexp -all -inline -- $re $line]
+    for {set i 0} {$i < [llength $all]} {incr i $n} {
+        set w [lindex $all $i]
+        if {
+            [string length $w] >= 3 && ![string is digit [string index $w 0]]
+            && [regexp {[[:alpha:]]} $w]
+        } {
+            lappend out $w
+        }
+    }
+    return $out
+}
+
+# Atualiza o índice de $w; com $max > 0 processa no máximo $max linhas.
+# Retorna 1 se ficou completo.
+proc qc::acIndex {w {max 0}} {
+    variable TB
+    set re [acWordRe [expr {$w eq $::qc::ed ? "" : $TB($w,lang)}]]
+    if {![info exists TB($w,acre)] || $TB($w,acre) ne $re} {
+        set TB($w,acre) $re
+        set TB($w,acln) {}
+        set TB($w,acct) [dict create]
+        set TB($w,acdirty) {1 0}
+    }
+    if {![info exists TB($w,acdirty)]} {return 1}
+    lassign $TB($w,acdirty) first tail
+    unset TB($w,acdirty)
+    set nl [lindex [split [$w index end-1c] .] 0]
+    set ln $TB($w,acln)
+    set ct $TB($w,acct)
+    unset TB($w,acln) TB($w,acct) ;# sem cópias ao alterar
+    set oldEnd [expr {max($first - 2, [llength $ln] - $tail - 1)}]
+    set last [expr {max($first - 1, $nl - $tail)}]
+    set done 1
+    if {$max > 0 && $last - $first + 1 > $max} {
+        set last [expr {$first + $max - 1}]
+        set done 0
+    }
+    foreach l [lrange $ln $first-1 $oldEnd] {
+        foreach x $l {
+            if {[dict get $ct $x] <= 1} {dict unset ct $x} else {dict incr ct $x -1}
+        }
+    }
+    set new {}
+    if {$last >= $first} {
+        set n [expr {[lindex [regexp -about $re] 0] + 1}]
+        set lines [split [$w get $first.0 "$last.0 lineend"] \n]
+        if {![llength $lines]} {set lines [list ""]} ;# uma linha vazia
+        foreach line $lines {
+            set l [acLineWords $line $re $n]
+            foreach x $l {dict incr ct $x}
+            lappend new $l
+        }
+    }
+    set TB($w,acln) [lreplace $ln[set ln {}] $first-1 $oldEnd {*}$new]
+    set TB($w,acct) $ct
+    if {!$done} {set TB($w,acdirty) [list [expr {$last + 1}] $tail]}
+    return $done
+}
+
+# Agenda a montagem/atualização do índice em segundo plano.
+proc qc::acSched {w {ms 800}} {
+    variable TB
+    if {[info exists TB($w,acafter)]} {return}
+    # tclint-disable-next-line command-args
+    set TB($w,acafter) [after $ms [list qc::acStep $w]]
+}
+
+proc qc::acStep {w} {
+    variable TB
+    unset -nocomplain TB($w,acafter)
+    if {![winfo exists $w] || $w ne $::qc::ed} {return}
+    if {![acIndex $w 1500]} {acSched $w 1}
+}
+
 # Parte da palavra antes do cursor ("" se o cursor não está numa palavra).
 proc qc::acPrefix {} {
     set before [$::qc::ed get "insert linestart" insert]
@@ -3678,15 +3776,31 @@ proc qc::acPool {} {
     variable H
     variable cfg
     variable PS
+    variable TB
     set re [acWordRe]
-    # o texto sem a palavra que está sendo digitada
-    set text "[$ed get 1.0 $AC(start)]\n[$ed get insert end]"
-    foreach w $::qc::tabs {
-        if {$w ne $ed && $::qc::TB($w,lang) eq $::qc::lang} {
-            append text \n [$w get 1.0 end-1c]
+    acIndex $ed
+    set buf [dict keys $TB($ed,acct)]
+    # sem a palavra que está sendo digitada (se só existe ali)
+    set col [lindex [split [$ed index insert] .] 1]
+    set n [expr {[lindex [regexp -about $re] 0] + 1}]
+    set all [regexp -all -inline -indices -- $re [$ed get "insert linestart" "insert lineend"]]
+    for {set i 0} {$i < [llength $all]} {incr i $n} {
+        lassign [lindex $all $i] a b
+        if {$a < $col && $b + 1 >= $col} {
+            set cur [$ed get "insert linestart +${a}c" "insert linestart +[expr {$b + 1}]c"]
+            if {[dict exists $TB($ed,acct) $cur] && [dict get $TB($ed,acct) $cur] == 1} {
+                set buf [lsearch -all -inline -exact -not $buf $cur]
+            }
+            break
         }
     }
-    set AC(buf) [acExtract $text $re]
+    foreach w $::qc::tabs {
+        if {$w ne $ed && $TB($w,lang) eq $::qc::lang} {
+            acIndex $w
+            lappend buf {*}[dict keys $TB($w,acct)]
+        }
+    }
+    set AC(buf) [lsort -unique $buf]
     set AC(kw) [lsort [dict keys $H(words)]]
     set AC(proj) {}
     if {$cfg(folder) ne ""} {
@@ -5584,6 +5698,7 @@ proc qc::activateTab {w} {
         # destaque que ficou pela metade (etapas) ou edições sem destaque
         if {[info exists TB($w,dirty)]} {schedHighlight}
     }
+    acSched $w
     $host.sy set {*}[$w yview]
     $host.sx set {*}[$w xview]
     if {[winfo ismapped [fb]]} {markAll}
@@ -7474,7 +7589,7 @@ proc qc::showShortcuts {} {
         "Ctrl+Z / Ctrl+Y       Desfazer / Refazer"
         "Ctrl+F / Ctrl+H       Localizar / Substituir"
         "F3 / Shift+F3         Próximo / Anterior"
-        "Ctrl+L                Ir para linha"
+        "Ctrl+G / Ctrl+L       Ir para linha"
         "F12 / Alt+←           Ir para definição / Voltar"
         "Ctrl+D                Selecionar próxima ocorrência"
         "Alt+F3                Selecionar todas as ocorrências"

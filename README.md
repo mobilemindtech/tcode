@@ -252,7 +252,7 @@ o interpretador, as opções passadas a ele e os argumentos do programa.
 | Ctrl+Z / Ctrl+Y | Desfazer / Refazer |
 | Ctrl+F / Ctrl+H | Localizar / Substituir |
 | F3 / Shift+F3 | Próximo / Anterior |
-| Ctrl+L | Ir para linha |
+| Ctrl+G / Ctrl+L | Ir para linha |
 | F12 / Alt+← | Ir para definição / Voltar |
 | Ctrl+D | Selecionar palavra / próxima ocorrência (vários cursores) |
 | Alt+F3 | Selecionar todas as ocorrências |
