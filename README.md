@@ -21,6 +21,8 @@ pode ser interrompida a qualquer momento.
 - Guias de coluna: linhas verticais nas colunas 80 e 120 (Exibir > Guias de
   coluna liga/desliga; Exibir > Colunas das guias… muda as colunas) e guias de
   indentação, uma por nível (Exibir > Guias de indentação)
+- TODO, FIXME, XXX, HACK e BUG em comentários ficam destacados; Editar >
+  Listar TODOs… (Ctrl+Shift+L) mostra todos e leva até a linha escolhida
 - Parênteses coloridos por nível de aninhamento ("rainbow") em Scheme, Tcl e
   OCaml; os que ficam sem par (ou com o par trocado, ex.: `(]`) em vermelho
 - Em Scheme, `define` e `lambda` aparecem como `λ` (só na tela: o arquivo não muda; a
@@ -58,7 +60,9 @@ pode ser interrompida a qualquer momento.
 - Vários cursores no estilo Sublime: Ctrl+D seleciona a próxima ocorrência da
   seleção, Alt+F3 todas, Alt+clique, Ctrl+clique (fora de um nome com definição) ou
   Shift+Alt+↑/↓ adicionam cursores; o
-  que for digitado vale para todos
+  que for digitado vale para todos. Ctrl+C/Ctrl+X copiam/recortam o trecho
+  selecionado de cada cursor (uma linha por cursor, como numa seleção em
+  bloco) e Ctrl+V, com tantas linhas quanto cursores, cola uma em cada
 - Autocompletar (Ctrl+Espaço, ou sozinho ao digitar 3 letras): sugere palavras
   do arquivo aberto, palavras-chave da linguagem e, com uma pasta aberta,
   palavras dos arquivos da pasta da mesma linguagem (indexados em segundo
@@ -253,6 +257,7 @@ o interpretador, as opções passadas a ele e os argumentos do programa.
 | Ctrl+F / Ctrl+H | Localizar / Substituir |
 | F3 / Shift+F3 | Próximo / Anterior |
 | Ctrl+G / Ctrl+L | Ir para linha |
+| Ctrl+Shift+L | Listar TODOs/FIXMEs do arquivo |
 | F12 / Alt+← | Ir para definição / Voltar |
 | Ctrl+D | Selecionar palavra / próxima ocorrência (vários cursores) |
 | Alt+F3 | Selecionar todas as ocorrências |

@@ -89,6 +89,8 @@ namespace eval qc {
     variable mlast "" ;# último cursor adicionado com Ctrl+D
     variable mword "" ;# seleção criada pelo Ctrl+D sem seleção (busca palavras inteiras)
     variable mapplying 0
+    variable mid "" ;# cursor em edição dentro de multiApply
+    variable mpart ;# paste: texto de cada cursor
     variable mcol 0 ;# coluna usada pelo Shift+Alt+↑/↓
     variable atomicDepth 0
     variable langs {} ;# ids das linguagens, em ordem de registro
@@ -138,6 +140,7 @@ namespace eval qc {
         var       {#9876aa {}}  interp    {#9876aa {}}  option    {#bbb529 {}}
         annot     {#bbb529 {}}  brace     {#d0a86a {}}  directive {#629755 I}
         builtin   {#ffc66d {}}  constant  {#6897bb B}   symbol    {#9876aa {}}
+        todo      {#a8c023 BI}
     }
     # Cores dos parênteses por nível (linguagens com "rainbow 1")
     variable rainbow {#d0a86a #c586c0 #4fb3d9 #8fbf6a #e07b53 #9b9bf5}
@@ -372,6 +375,7 @@ proc qc::setupTheme {} {
     font create QcMono -family $fam -size $cfg(fontsize)
     font create QcMonoB -family $fam -size $cfg(fontsize) -weight bold
     font create QcMonoI -family $fam -size $cfg(fontsize) -slant italic
+    font create QcMonoBI -family $fam -size $cfg(fontsize) -weight bold -slant italic
 
     tk_setPalette background $C(ui) foreground $C(uifg) \
         activeBackground $C(accent) activeForeground #ffffff \
@@ -628,6 +632,7 @@ proc qc::buildMenus {} {
     $m add command -label "Ir para linha…" -accelerator Ctrl+G -command qc::gotoDialog
     $m add command -label "Ir para definição" -accelerator F12 -command qc::goToDefinition
     $m add command -label "Voltar" -accelerator Alt+← -command qc::navBack
+    $m add command -label "Listar TODOs…" -accelerator Ctrl+Shift+L -command qc::todoList
 
     set m [menu .mb.lang -tearoff 0]
     .mb add cascade -label Linguagem -menu $m
@@ -843,6 +848,7 @@ proc qc::setupBindings {} {
         <Alt-F3>            {focus $::qc::ed; qc::selectAllOcc}
         <Control-g>         qc::gotoDialog
         <Control-l>         qc::gotoDialog
+        <Control-L>         qc::todoList
         <Control-F>         qc::formatCode
         <Control-braceleft> qc::foldCursor
         <Control-braceright> qc::unfoldCursor
@@ -922,7 +928,9 @@ proc qc::setupBindings {} {
     # Alt+clique) adiciona um cursor
     bind QcMulti <Control-Button-1> {qc::ctrlClick %W %x %y; break}
     bind QcMulti <Alt-Button-1> {qc::addCaretAt %x %y; break}
-    bind QcMulti <<Paste>> {if {[llength $::qc::mcur]} {qc::multiApply {qc::paste $::qc::ed}; break}}
+    bind QcMulti <<Paste>> {if {[llength $::qc::mcur]} {qc::paste $::qc::ed; break}}
+    bind QcMulti <<Cut>> {if {[llength $::qc::mcur]} {qc::multiCopy 1; break}}
+    bind QcMulti <<Copy>> {if {[llength $::qc::mcur]} {qc::multiCopy 0; break}}
 
     bindtags $con [list $con QcKeys Text . all]
     bind $con <Button-3> {tk_popup .conpop %X %Y}
@@ -1845,6 +1853,11 @@ proc qc::compileLang {} {
     set H(through) [dict get $d defThroughBrace]
     set H(pretty) [dict get $d pretty]
     set H(sub) [dict get $d sub]
+    # TODO/FIXME/... nos comentários: da palavra até o fim da linha
+    variable todoRe
+    # (sem o fechamento de um comentário de bloco: */ |# *) -->)
+    dict lappend H(sub) comment $todoRe todo \
+        "${todoRe}(?:\[^\n*|-\]|\\*(?!\[/)\])|\\|(?!#)|-(?!->))*"
     set H(wordHook) [hook wordTag]
     set H(rainbow) [expr {[dict get $d rainbow] ? [llength $::qc::rainbow] : 0}]
     # grupos do token string, se ele só vale no início de uma palavra
@@ -1883,6 +1896,7 @@ proc qc::compileLang {} {
             switch -- $st {
                 B {lappend opts -font QcMonoB}
                 I {lappend opts -font QcMonoI}
+                BI {lappend opts -font QcMonoBI}
             }
         }
         ::qc::_edw tag configure $t {*}$opts
@@ -3357,9 +3371,20 @@ proc qc::selectAll {w} {
 }
 
 proc qc::paste {w} {
+    variable mpart
     if {[catch {clipboard get} data]} {return}
     if {$w eq $::qc::ed && [llength $::qc::mcur] && !$::qc::mapplying} {
-        multiApply [list qc::paste $w]
+        # uma linha por cursor (ex.: copiado de uma seleção em bloco): cada
+        # cursor recebe a sua, na ordem do texto; senão, tudo em cada um
+        set lines [split $data \n]
+        set ids [multiOrder]
+        if {[llength $lines] == [llength $ids]} {
+            array unset mpart
+            foreach id $ids l $lines {set mpart($id) $l}
+            multiApply qc::pastePart
+        } else {
+            multiApply [list qc::paste $w]
+        }
         return
     }
     atomic {
@@ -3367,6 +3392,15 @@ proc qc::paste {w} {
         $w insert insert $data
     }
     $w see insert
+}
+
+# Parte do texto colado que cabe ao cursor em edição (ver qc::paste).
+proc qc::pastePart {} {
+    variable mpart
+    variable ed
+    set data [expr {[info exists mpart($::qc::mid)] ? $mpart($::qc::mid) : ""}]
+    catch {$ed delete sel.first sel.last}
+    $ed insert insert $data
 }
 
 proc qc::selLines {} {
@@ -4535,6 +4569,52 @@ proc qc::goToDefinition {{idx insert}} {
         [expr {[winfo rooty $ed] + [lindex $bb 1] + [lindex $bb 3]}]
 }
 
+# --- TODO/FIXME nos comentários ---------------------------------------------
+
+namespace eval qc {
+    variable todoRe {\m(?:TODO|FIXME|XXX|HACK|BUG)\M}
+}
+
+# Menu com os TODOs do arquivo (marcados pelo destaque); escolher um leva
+# até a linha.
+proc qc::todoList {} {
+    variable ed
+    variable TB
+    # termina o destaque que estiver pela metade (etapas)
+    set n 0
+    while {[info exists TB($ed,dirty)] && [incr n] < 1000} {highlight inc}
+    set rs [::qc::_edw tag ranges todo]
+    if {![llength $rs]} {
+        set ::qc::status "Nenhum TODO neste arquivo"
+        return
+    }
+    set m .todopop
+    destroy $m
+    menu $m -tearoff 0
+    set k 0
+    foreach {a b} $rs {
+        if {[incr k] > 60} {
+            $m add command -label "… mais [expr {[llength $rs] / 2 - 60}]" -state disabled
+            break
+        }
+        set line [lindex [split $a .] 0]
+        set txt [string trim [$ed get $a $b]]
+        if {[string length $txt] > 80} {set txt "[string range $txt 0 78]…"}
+        $m add command -label [format "%5d   %s" $line $txt] \
+            -command [list qc::todoGo $a]
+    }
+    set bb [$ed bbox insert]
+    if {![llength $bb]} {set bb {0 0 0 0}}
+    tk_popup $m [expr {[winfo rootx $ed] + [lindex $bb 0]}] \
+        [expr {[winfo rooty $ed] + [lindex $bb 1] + [lindex $bb 3]}]
+}
+
+proc qc::todoGo {idx} {
+    navPush
+    lassign [split $idx .] line col
+    gotoLine $line $col
+}
+
 proc qc::gotoDef {d} {
     lassign $d f w name line col
     navPush
@@ -4805,6 +4885,7 @@ proc qc::multiApply {script} {
         atomic {
             foreach id [concat $mcur p] {
                 regLoad $id
+                set ::qc::mid $id
                 uplevel #0 $script
                 regSave $id
             }
@@ -4835,6 +4916,37 @@ proc qc::multiApply {script} {
 }
 
 proc qc::regKey {a b} {return "$a $b"}
+
+# Ids dos cursores (os extras e "p", o principal) na ordem do texto.
+proc qc::multiOrder {} {
+    variable mcur
+    regSave p
+    set l {}
+    foreach id [concat $mcur p] {lappend l [list [lindex [regGet $id] 0] $id]}
+    ::qc::_edw mark unset qcmpa qcmpb
+    return [lmap x [lsort -dictionary -index 0 $l] {lindex $x 1}]
+}
+
+# Ctrl+C / Ctrl+X com vários cursores: o texto selecionado de cada um, uma
+# linha por cursor (na ordem do texto); recortar apaga em todos.
+proc qc::multiCopy {cut} {
+    variable mcur
+    regSave p
+    set rs {}
+    foreach id [concat $mcur p] {lappend rs [regGet $id]}
+    ::qc::_edw mark unset qcmpa qcmpb
+    set parts {}
+    set any 0
+    foreach r [lsort -dictionary -index 0 $rs] {
+        lassign $r a b
+        lappend parts [::qc::_edw get $a $b]
+        if {[::qc::_edw compare $a < $b]} {set any 1}
+    }
+    if {!$any} {return}
+    clipboard clear
+    clipboard append [join $parts \n]
+    if {$cut} {multiApply {catch {$::qc::ed delete sel.first sel.last}}}
+}
 
 proc qc::multiRedraw {} {
     variable mcur
@@ -4904,6 +5016,11 @@ proc qc::multiKey {K A s} {
         return -code break
     }
     if {$s & 0x0C} {
+        # Ctrl+C/X copiam/recortam de todos (uma linha por cursor)
+        if {($s & 0x0C) == 4 && [string tolower $K] in {c x}} {
+            multiCopy [expr {[string tolower $K] eq "x"}]
+            return -code break
+        }
         # Ctrl+D continua adicionando, Ctrl+V cola em todos (via qc::paste),
         # Ctrl+S/R não mexem no texto; o resto volta a um cursor só
         if {
@@ -5169,7 +5286,7 @@ proc qc::zoom {d} {
     } else {
         set cfg(fontsize) [expr {max(6, min(48, $cfg(fontsize) + $d))}]
     }
-    foreach f {QcMono QcMonoB QcMonoI} {font configure $f -size $cfg(fontsize)}
+    foreach f {QcMono QcMonoB QcMonoI QcMonoBI} {font configure $f -size $cfg(fontsize)}
     mdZoom
     updateTabs
     schedGutter
@@ -7590,6 +7707,7 @@ proc qc::showShortcuts {} {
         "Ctrl+F / Ctrl+H       Localizar / Substituir"
         "F3 / Shift+F3         Próximo / Anterior"
         "Ctrl+G / Ctrl+L       Ir para linha"
+        "Ctrl+Shift+L          Listar TODOs/FIXMEs"
         "F12 / Alt+←           Ir para definição / Voltar"
         "Ctrl+D                Selecionar próxima ocorrência"
         "Alt+F3                Selecionar todas as ocorrências"
