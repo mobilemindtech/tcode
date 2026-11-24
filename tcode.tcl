@@ -43,7 +43,9 @@
 # %O opções do usuário, %A argumentos do programa, %--A "-- args" se houver.
 # Outras chaves: capType, numberWord, sub, styles, commentRe, dedentChars,
 # autoPairs (pares fechados automaticamente, ex.: {() [] \"\"}),
-# defThroughBrace, col0, infoRe, warnRe, grayInfo, rainbow (1 = parênteses
+# defThroughBrace, col0, infoRe, warnRe, grayInfo, quoteAtWordStart (1 = o
+# token string só começa no início de uma palavra, como no Tcl: depois de
+# espaço, "[", "{" ou ";"), rainbow (1 = parênteses
 # coloridos por nível de aninhamento; ver qc::rainbow), defPatterns (regexes
 # extras de definição para o F12, com UM grupo = o nome; as palavras de
 # defWords já geram uma), defWordsRe (substitui essa regex gerada pelas
@@ -146,6 +148,7 @@ namespace eval qc {
         runners {} errPatterns {} col0 0 infoRe "" warnRe "" grayInfo 0
         templates {} autoPairs {() [] \{\} \"\" ''} rainbow 0 defPatterns {}
         docString 0 pretty {} linters {} formatters {} defWordsRe ""
+        quoteAtWordStart 0
     }
     namespace eval lang {}
 }
@@ -946,8 +949,36 @@ proc qc::installProxy {w} {
 }
 
 proc qc::edProxy {w args} {
+    set op [lindex $args 0]
+    if {$op in {insert delete replace}} {
+        # linhas tocadas, para o destaque incremental (ver qc::highlight)
+        set raw ::qc::raw$w
+        if {[catch {
+            set n0 [$raw count -lines 1.0 end]
+            set l1 [lindex [split [$raw index [lindex $args 1]] .] 0]
+            switch -- $op {
+                insert {set l2 $l1}
+                delete {
+                    if {[llength $args] > 3} {error "vários trechos"}
+                    set i2 [expr {[llength $args] > 2 ? [lindex $args 2] : "[lindex $args 1] +1c"}]
+                    set l2 [lindex [split [$raw index $i2] .] 0]
+                }
+                replace {set l2 [lindex [split [$raw index [lindex $args 2]] .] 0]}
+            }
+        }]} {
+            set l1 ""
+        }
+    }
     if {[catch {::qc::raw$w {*}$args} r o]} {
         return -code error -errorcode [dict get $o -errorcode] $r
+    }
+    if {$op in {insert delete replace}} {
+        if {$l1 eq "" || [catch {$raw count -lines 1.0 end} n1]} {
+            hlDirty $w 1 0
+        } else {
+            # linhas depois do trecho alterado (inalteradas)
+            hlDirty $w $l1 [expr {$n1 - ($l2 + $n1 - $n0)}]
+        }
     }
     if {$w ne $::qc::ed} {return $r}
     switch -- [lindex $args 0] {
@@ -1795,6 +1826,10 @@ proc qc::compileLang {} {
     }
     set H(re) "(?w)[join $parts |]"
     set H(specs) $specs
+    foreach sp $specs {
+        lassign $sp st sg inner
+        set H(spec,$sg) [list $st $inner]
+    }
     set H(nfields) $g
     set wd [dict create]
     dict for {tag list} [dict get $d words] {
@@ -1811,6 +1846,13 @@ proc qc::compileLang {} {
     set H(sub) [dict get $d sub]
     set H(wordHook) [hook wordTag]
     set H(rainbow) [expr {[dict get $d rainbow] ? [llength $::qc::rainbow] : 0}]
+    # grupos do token string, se ele só vale no início de uma palavra
+    set H(qws) {}
+    if {[dict get $d quoteAtWordStart]} {
+        foreach sp $specs {
+            if {[lindex $sp 0] eq "string"} {lappend H(qws) [lindex $sp 1]}
+        }
+    }
     set subtags {}
     dict for {t rules} $H(sub) {
         foreach {cond st sre} $rules {lappend subtags $st}
@@ -1851,119 +1893,554 @@ proc qc::compileLang {} {
 proc qc::schedHighlight {} {
     variable hlAfter
     after cancel $hlAfter
-    set hlAfter [after 120 {qc::highlight}]
+    set hlAfter [after 120 {qc::highlight inc}]
 }
 
-proc qc::highlight {} {
+# Acumula o trecho alterado desde o último destaque: {primeira linha
+# tocada, nº de linhas inalteradas no fim}. As duas medidas não mudam com
+# edições feitas depois (acima ou abaixo), então dá para juntar com min.
+proc qc::hlDirty {w first tail} {
+    variable TB
+    if {[info exists TB($w,dirty)]} {
+        lassign $TB($w,dirty) f0 t0
+        set first [expr {min($f0, $first)}]
+        set tail [expr {min($t0, $tail)}]
+    }
+    set TB($w,dirty) [list [expr {max(1, $first)}] [expr {max(0, $tail)}]]
+}
+
+# Destaque de sintaxe. Os tokens vêm da regex H(re), aplicada em sequência
+# (cada busca começa onde o token anterior terminou). Por linha ficam
+# guardados (listas em TB):
+#   <ed>,hlck  estado no começo da linha: "" se está dentro de um token
+#              (comentário/string de várias linhas), "?" se não se sabe,
+#              senão defNext (0/1)
+#   <ed>,hlbr  rainbow: parênteses da linha {coluna caractere ...}
+# (e as cores dos parênteses: ver qc::rainbowPass).
+#
+# mode:
+#   full  (padrão) refaz tudo, em etapas (abrir arquivo, trocar linguagem)
+#   inc   depois de edições registradas por hlDirty: recomeça na última
+#         linha antes da edição com estado conhecido e para na primeira
+#         linha do trecho inalterado do fim cujo estado coincide com o
+#         anterior; dali em diante as tags (que o widget text desloca junto
+#         com o texto) e os estados continuam valendo
+#   sync  tudo de uma vez (testes)
+# Cada etapa analisa no máximo umas 150 linhas além do necessário: se não
+# convergir, grava o que fez e agenda a continuação (a interface não trava
+# com uma aspa aberta num arquivo grande). A cor dos parênteses depende do
+# arquivo todo e é refeita quando a análise termina.
+proc qc::highlight {{mode full}} {
     variable ed
     variable H
-    set txt [$ed get 1.0 end-1c]
-    set starts {}
-    set o 0
-    foreach ln [split $txt \n] {
-        lappend starts $o
-        incr o [expr {[string length $ln] + 1}]
+    variable TB
+    variable hlAfter
+    after cancel $hlAfter
+    set nl [lindex [split [$ed index end-1c] .] 0]
+    set rb $H(rainbow)
+    if {$mode eq "full"} {
+        # estados desconhecidos: a análise incremental refaz tudo, em etapas
+        set TB($ed,hlck) [lrepeat $nl ?]
+        set TB($ed,hlsig) [hlSig]
+        set TB($ed,hlbr) [lrepeat $nl {}]
+        set TB($ed,hlrc) [lrepeat $nl {}]
+        set TB($ed,hlstk) [lrepeat $nl ?]
+        lset TB($ed,hlstk) 0 {}
+        set TB($ed,hlcls) [lrepeat $nl ?]
+        set TB($ed,rbp) [list 1 0 1]
+        set TB($ed,dirty) [list 1 0]
+        set mode inc
     }
-    foreach t $H(tags) {set rng($t) {}}
-    set nf $H(nfields)
-    set defNext 0
-    set open {} ;# rainbow: aberturas pendentes {fecho range}
-    set pretty [expr {$::qc::cfg(pretty) && [dict size $H(pretty)]}]
-    set pw {} ;# palavras exibidas como símbolo
-    set pe {} ;# ...e o trecho oculto de cada uma
-    set m [regexp -all -inline -indices -- $H(re) $txt]
-    for {set i 0} {$i < [llength $m]} {incr i $nf} {
-        set tag ""
-        foreach spec $H(specs) {
-            lassign $spec t g inner
-            set r [lindex $m [expr {$i + $g}]]
-            if {[lindex $r 0] < 0} {continue}
-            set tag $t
+    set inc [expr {$mode eq "inc"}]
+    if {$inc && (![info exists TB($ed,dirty)] || ![info exists TB($ed,hlck)]
+            || ![info exists TB($ed,hlsig)] || $TB($ed,hlsig) ne [hlSig])} {
+        if {![info exists TB($ed,dirty)]} {return}
+        # estados de outra linguagem/configuração: do zero
+        tailcall highlight full
+    }
+    set sl 1 ;# linha onde a análise começa
+    set ck {}
+    set dl 0
+    set firstTail [expr {$nl + 1}]
+    if {$inc} {
+        lassign $TB($ed,dirty) d0 tailN
+        set ck $TB($ed,hlck)
+        set dl [expr {$nl - [llength $ck]}]
+        set sl [expr {max(1, min($d0 - 1, [llength $ck]))}]
+        while {$sl > 1 && [lindex $ck $sl-1] in {"" ?}} {incr sl -1}
+        # primeira linha do trecho final inalterado (só ali pode convergir)
+        set firstTail [expr {max($nl - $tailN + 1, $sl + 1)}]
+    }
+    unset -nocomplain TB($ed,dirty)
+    # Texto a partir da linha sl (offsets relativos a ela; ws: começo das
+    # linhas já alcançadas, ns: começo da próxima, tlen+1 = não há), e só um
+    # trecho dele: pegar o resto do widget custa caro. E = primeira linha
+    # fora do trecho. Tokens de várias linhas cortados no fim do trecho
+    # (regex com fechamento opcional) chegam até a borda e encerram a etapa
+    # antes deles.
+    if {!$inc} {
+        set E [expr {$nl + 1}]
+    } elseif {$firstTail - $sl > 150} {
+        set E [expr {min($nl + 1, $sl + 150)}]
+    } else {
+        set E [expr {min($nl + 1, $firstTail + 60)}]
+    }
+    # um token que atravessa o fim do trecho: dobra o trecho e refaz (a
+    # etapa precisa terminar fora de token para a próxima começar adiante)
+    while 1 {
+        set part [expr {$E <= $nl}]
+        set txt [$ed get $sl.0 [expr {$part ? "$E.0" : "end-1c"}]]
+        set tlen [string length $txt]
+        set ws 0
+        set ns [string first \n $txt]
+        set ns [expr {$ns < 0 ? $tlen + 1 : $ns + 1}]
+        set cl $sl ;# linha corrente (a de ws end)
+        set cs 0 ;# ...e o começo dela
+        set defNext [expr {$sl > 1 ? [lindex $ck $sl-1] : 0}]
+        set newck [lrange $ck 0 $sl-2]
+        lappend newck $defNext
+        set L $sl ;# próxima linha (base 0) a receber estado
+        set stop "" ;# conv: convergiu na linha L; part: fim do trecho
+        set lbr {} ;# rainbow: parênteses da linha corrente
+        set winbr {} ;# ...e das linhas analisadas
+        foreach t $H(tags) {set rng($t) {}}
+        set pretty [expr {$::qc::cfg(pretty) && [dict size $H(pretty)]}]
+        set pw {} ;# palavras exibidas como símbolo
+        set pe {} ;# ...e o trecho oculto de cada uma
+        set qws [llength $H(qws)]
+        set pos 0
+        # etapa de trecho grande: todos os tokens dele de uma vez (mais
+        # rápido). Trecho pequeno (digitação, converge logo) ou o texto todo
+        # (cada aspa no meio de palavra refaria a busca até o fim): um por vez
+        set bulk [expr {$part && $E - $sl > 100}]
+        set nf $H(nfields)
+        set mall {}
+        set mi 0
+        while 1 {
+            if {$bulk} {
+                if {$mi >= [llength $mall]} {
+                    set mall [regexp -all -inline -indices -start $pos -- $H(re) $txt]
+                    set mi 0
+                }
+                set m [lrange $mall $mi [expr {$mi + $nf - 1}]]
+                incr mi $nf
+            } else {
+                set m [regexp -inline -indices -start $pos -- $H(re) $txt]
+            }
+            if {[llength $m]} {
+                lassign [lindex $m 0] a z
+            } else {
+                set a [set z $tlen]
+            }
+            # estado no começo das linhas entre o token anterior e este
+            while {$L < $nl && $ns <= $a} {
+                if {$L + 1 >= $firstTail && [lindex $ck [expr {$L - $dl}]] eq $defNext} {
+                    set stop conv
+                    break
+                }
+                if {$part && $L + 2 >= $E} {
+                    set stop part
+                    break
+                }
+                if {$rb} {
+                    lappend winbr $lbr
+                    set lbr {}
+                }
+                lappend newck $defNext
+                incr L
+                set cl [expr {$sl + [llength $ws]}]
+                set cs $ns
+                lappend ws $ns
+                set k [string first \n $txt $ns]
+                set ns [expr {$k < 0 ? $tlen + 1 : $k + 1}]
+            }
+            if {$stop ne "" || ![llength $m]} {break}
+            # aspas no meio de uma palavra (quoteAtWordStart): caractere comum
+            if {$qws && $a > 0 && [string index $txt $a-1] ni {" " "\t" "\n" "\[" "\{" ";"}} {
+                set mid 0
+                foreach g $H(qws) {
+                    if {[lindex $m $g 0] == $a} {set mid 1}
+                }
+                if {$mid} {
+                    set pos [expr {$a + 1}]
+                    set mall {}
+                    continue
+                }
+            }
+            if {$z >= $ns && $L < $nl} {
+                # token de várias linhas: as linhas dentro dele ficam com ""
+                set k $ns
+                while {$k <= $z} {
+                    if {$part && $L + 2 >= $E} {
+                        set stop grow
+                        break
+                    }
+                    if {$rb} {
+                        lappend winbr $lbr
+                        set lbr {}
+                    }
+                    lappend newck ""
+                    incr L
+                    lappend ws $k
+                    set k [string first \n $txt $k]
+                    set k [expr {$k < 0 ? $tlen + 1 : $k + 1}]
+                    if {$L >= $nl} {break}
+                }
+                if {$stop ne ""} {break}
+                set ns $k
+                set cl [expr {$sl + [llength $ws] - 1}]
+                set cs [lindex $ws end]
+            }
+            set pos [expr {$z >= $a ? $z + 1 : $a + 1}]
+            # o primeiro grupo que casou (os grupos internos vêm depois do seu)
+            set g [lsearch -exact -not -start 1 $m {-1 -1}]
+            if {$g < 0 || ![info exists H(spec,$g)]} {continue}
+            lassign $H(spec,$g) tag inner
+            set r [lindex $m $g]
             if {$inner} {
-                set r2 [lindex $m [expr {$i + $g + 1}]]
+                set r2 [lindex $m $g+1]
                 if {[lindex $r2 0] >= 0} {set r $r2}
             }
-            break
-        }
-        if {$tag eq ""} {continue}
-        lassign $r a z
-        if {$tag eq "word"} {
-            set word [string range $txt $a $z]
-            if {$pretty && [dict exists $H(pretty) $word]} {
-                lappend pw [off2idx $starts $a] [off2idx $starts [expr {$z + 1}]]
-                lappend pe [off2idx $starts [expr {$a + 1}]] [off2idx $starts [expr {$z + 1}]]
-            }
-            set tag ""
-            set fromTable 0
-            if {$H(numRe) ne "" && [regexp -- $H(numRe) $word]} {
-                set tag number
-            } elseif {[dict exists $H(words) $word]} {
-                set tag [dict get $H(words) $word]
-                set fromTable 1
-            }
-            if {$H(wordHook) ne ""} {set tag [$H(wordHook) $word $tag $txt $a]}
-            if {$tag ne ""} {
-                set defNext [expr {$fromTable && $word in $H(defWords)}]
-            } elseif {$defNext} {
-                set tag $H(defTag)
+            lassign $r a z
+            if {$tag eq "word"} {
+                set word [string range $txt $a $z]
+                if {$pretty && [dict exists $H(pretty) $word]} {
+                    lappend pw [hlIdx $ws $sl $ns $a] [hlIdx $ws $sl $ns [expr {$z + 1}]]
+                    lappend pe [hlIdx $ws $sl $ns [expr {$a + 1}]] [hlIdx $ws $sl $ns [expr {$z + 1}]]
+                }
+                set tag ""
+                set fromTable 0
+                if {$H(numRe) ne "" && [regexp -- $H(numRe) $word]} {
+                    set tag number
+                } elseif {[dict exists $H(words) $word]} {
+                    set tag [dict get $H(words) $word]
+                    set fromTable 1
+                }
+                if {$H(wordHook) ne ""} {set tag [$H(wordHook) $word $tag $txt $a]}
+                if {$tag ne ""} {
+                    set defNext [expr {$fromTable && $word in $H(defWords)}]
+                } elseif {$defNext} {
+                    set tag $H(defTag)
+                    set defNext 0
+                } elseif {$H(capType) ne "" && [string is upper [string index $word 0]]} {
+                    set tag $H(capType)
+                } else {
+                    set defNext 0
+                    continue
+                }
+            } elseif {!($tag eq "brace" && $H(through))} {
                 set defNext 0
-            } elseif {$H(capType) ne "" && [string is upper [string index $word 0]]} {
-                set tag $H(capType)
-            } else {
-                set defNext 0
+            }
+            if {$tag eq "brace" && $rb} {
+                # a cor (nível de aninhamento) vem depois, em rainbowPass
+                lappend lbr [expr {$a - $cs}] [string index $txt $a]
                 continue
             }
-        } elseif {!($tag eq "brace" && $H(through))} {
-            set defNext 0
-        }
-        if {$tag eq "brace" && $H(rainbow)} {
-            # cor pelo nível de aninhamento; a abertura só é colorida quando
-            # o fechamento correspondente aparece. Sem par (ou com o par
-            # trocado, ex.: "(]"): rbbad
-            set ch [string index $txt $a]
-            set r [list [off2idx $starts $a] [off2idx $starts [expr {$a + 1}]]]
-            set k [string first $ch "(\[\{"]
-            if {$k >= 0} {
-                lappend open [list [string index ")\]\}" $k] $r]
-            } elseif {[llength $open] && [lindex $open end 0] eq $ch} {
-                set rt rb[expr {([llength $open] - 1) % $H(rainbow)}]
-                lappend rng($rt) {*}[lindex $open end 1] {*}$r
-                set open [lrange $open 0 end-1]
+            # índices: o token quase sempre está na linha corrente
+            if {$a >= $cs && $z + 1 < $ns} {
+                lappend rng($tag) $cl.[expr {$a - $cs}] $cl.[expr {$z + 1 - $cs}]
             } else {
-                lappend rng(rbbad) {*}$r
+                lappend rng($tag) [hlIdx $ws $sl $ns $a] [hlIdx $ws $sl $ns [expr {$z + 1}]]
             }
-            continue
-        }
-        lappend rng($tag) [off2idx $starts $a] [off2idx $starts [expr {$z + 1}]]
-        # sub-destaques (ex.: interpolação em strings)
-        if {[dict exists $H(sub) $tag]} {
-            set str [string range $txt $a $z]
-            foreach {cond st sre} [dict get $H(sub) $tag] {
-                if {![regexp -- $cond $str]} {continue}
-                foreach sr [regexp -all -inline -indices -- $sre $str] {
-                    lassign $sr ia iz
-                    lappend rng($st) [off2idx $starts [expr {$a + $ia}]] \
-                        [off2idx $starts [expr {$a + $iz + 1}]]
+            # sub-destaques (ex.: interpolação em strings)
+            if {[dict exists $H(sub) $tag]} {
+                set str [string range $txt $a $z]
+                foreach {cond st sre} [dict get $H(sub) $tag] {
+                    if {![regexp -- $cond $str]} {continue}
+                    foreach sr [regexp -all -inline -indices -- $sre $str] {
+                        lassign $sr ia iz
+                        lappend rng($st) [hlIdx $ws $sl $ns [expr {$a + $ia}]] \
+                            [hlIdx $ws $sl $ns [expr {$a + $iz + 1}]]
+                    }
                 }
             }
         }
+        if {$stop ne "grow"} {break}
+        set E [expr {min($nl + 1, $sl + 2 * ($E - $sl))}]
     }
-    foreach o $open {lappend rng(rbbad) {*}[lindex $o 1]}
+    # newck tem os estados das linhas 0..L-1 (base 0)
+    if {$rb} {lappend winbr $lbr}
+    if {$stop eq ""} {
+        # chegou ao fim do texto
+        set to end
+        set wend $nl
+    } else {
+        # linhas L.. (base 0): as do trecho final inalterado mantêm o estado
+        # anterior; as que faltam analisar (etapa parcial) ficam "?", menos
+        # a própria L, que começa fora de token: a próxima etapa começa nela
+        set ft [expr {max($L, $firstTail - 1)}]
+        if {$stop eq "part"} {
+            lappend newck $defNext
+            set ft [expr {max($ft, $L + 1)}]
+            lappend newck {*}[lrepeat [expr {$ft - $L - 1}] ?]
+        } else {
+            lappend newck {*}[lrepeat [expr {$ft - $L}] ?]
+        }
+        lappend newck {*}[lrange $ck [expr {$ft - $dl}] end]
+        set to [expr {$L + 1}].0
+        set wend $L
+    }
+    set from $sl.0
     foreach t $H(tags) {
-        ::qc::_edw tag remove $t 1.0 end
+        if {$rb && [string match rb* $t]} {continue}
+        ::qc::_edw tag remove $t $from $to
         if {[llength $rng($t)]} {::qc::_edw tag add $t {*}$rng($t)}
     }
-    ::qc::_edw tag remove pword 1.0 end
-    ::qc::_edw tag remove pel 1.0 end
+    ::qc::_edw tag remove pword $from $to
+    ::qc::_edw tag remove pel $from $to
     if {[llength $pw]} {
         ::qc::_edw tag add pword {*}$pw
         ::qc::_edw tag add pel {*}$pe
     }
+    if {[llength $newck] == $nl} {
+        set TB($ed,hlck) $newck
+        set TB($ed,hlsig) [hlSig]
+    } else {
+        unset -nocomplain TB($ed,hlck)
+    }
+    set TB($ed,hlstat) [list $sl $wend $nl]
+    if {$rb} {
+        # parênteses por linha: os de antes e depois do trecho analisado
+        # não mudaram (colunas relativas à linha)
+        set rinc [expr {$inc && [info exists TB($ed,hlbr)] && [info exists TB($ed,hlstk)]}]
+        set oldbr [expr {$rinc ? $TB($ed,hlbr) : {}}]
+        set nb [lrange $winbr 0 [expr {$wend - $sl}]]
+        if {$stop eq "part"} {
+            set ft [expr {max($L + 1, $firstTail - 1)}]
+            lappend nb {*}[lrepeat [expr {$ft - $L}] {}]
+            set tailbr [lrange $oldbr [expr {$ft - $dl}] end]
+        } elseif {$stop eq "conv"} {
+            set tailbr [lrange $oldbr [expr {$L - $dl}] end]
+        } else {
+            set tailbr {}
+        }
+        set newbr [concat [lrange $oldbr 0 $sl-2] $nb $tailbr]
+        # cores: só com a análise terminada. Etapas pendentes (rbp: {linha
+        # inicial, linhas a mais, refazer até o fim}) juntam-se numa só
+        if {[info exists TB($ed,rbp)]} {
+            lassign $TB($ed,rbp) rf rdl rall
+            set TB($ed,rbp) [list [expr {min($rf, $sl)}] [expr {$rdl + $dl}] 1]
+        } else {
+            set TB($ed,rbp) [list $sl $dl 0]
+        }
+        set TB($ed,hlbr) $newbr
+        if {$stop ne "part"} {
+            lassign $TB($ed,rbp) rf rdl rall
+            unset TB($ed,rbp)
+            if {!$rinc} {
+                rainbowPass $newbr 0 1 $nl 0
+            } elseif {$rall} {
+                rainbowPass $newbr 1 $rf $nl $rdl
+            } else {
+                rainbowPass $newbr 1 $rf $wend $rdl
+            }
+        }
+    }
     unset -nocomplain ::qc::TB($ed,praw)
-    computeFolds $txt
+    if {$stop eq "part"} {
+        # continua depois de a interface respirar
+        hlDirty $ed [expr {$L + 2}] [expr {$nl - max($L + 2, $firstTail) + 1}]
+        set hlAfter [after 1 {qc::highlight inc}]
+    } elseif {$inc} {
+        schedFolds
+    } else {
+        computeFolds $txt
+    }
     prettyCursor
     schedGutter
-    if {[winfo ismapped [fb]]} {markAll}
+    if {$stop ne "part" && [winfo ismapped [fb]]} {markAll}
+}
+
+# Cor de cada parêntese pelo nível de aninhamento (rb0, rb1...); sem par, ou
+# com o par trocado (ex.: "(]"): rbbad. br: por linha {coluna caractere ...}.
+# Guarda por linha (TB): <ed>,hlrc as cores; <ed>,hlstk a pilha de aberturas
+# pendentes no começo da linha ({linha índice fecho} ..., "?" = não
+# conhecida) e <ed>,hlcls só os fechos dela.
+#
+# Incremental (inc 1; sl..wend = linhas reanalisadas, dl = linhas a mais):
+# recomeça na última linha até sl com pilha conhecida (as aberturas antes
+# de sl não mudaram de lugar) e para na primeira linha depois do trecho
+# reanalisado em que a pilha tem os mesmos fechos que antes: dali em diante
+# as cores não mudam. Se cada abertura ainda pendente terá par depois
+# disso depende só dos fechos e do texto seguinte, então basta simular a
+# pilha adiante até elas se resolverem. Só as linhas cuja cor mudou são
+# retingidas. Depois do ponto de convergência os fechos guardados continuam
+# valendo; as posições das aberturas, não ("?").
+proc qc::rainbowPass {br inc sl wend dl} {
+    variable ed
+    variable H
+    variable TB
+    set n $H(rainbow)
+    set nl [llength $br]
+    set K 0
+    set open {}
+    set cls ""
+    if {$inc} {
+        set ostk $TB($ed,hlstk)
+        set ocls $TB($ed,hlcls)
+        set orc $TB($ed,hlrc)
+        set K [expr {min($sl - 1, [llength $ostk] - 1)}]
+        while {$K > 0 && [lindex $ostk $K] eq "?"} {incr K -1}
+        set open [lindex $ostk $K]
+        set cls [lindex $ocls $K]
+        set rc [lrange $orc 0 $K-1]
+    } else {
+        set rc {}
+    }
+    set stk {}
+    set sc {}
+    set touched {} ;# linhas antes de K com cor mudada
+    set conv -1
+    for {set i $K} {$i < $nl} {incr i} {
+        if {$inc && $i >= $wend && [lindex $ocls [expr {$i - $dl}]] eq $cls} {
+            set conv $i
+            break
+        }
+        lappend stk $open
+        lappend sc $cls
+        set cs {}
+        set k 0 ;# índice do parêntese na linha
+        foreach {col ch} [lindex $br $i] {
+            set j [string first $ch "(\[\{"]
+            if {$j >= 0} {
+                set c [string index ")\]\}" $j]
+                lappend open [list $i $k $c]
+                append cls $c
+                lappend cs ?
+            } elseif {[llength $open] && [lindex $open end 2] eq $ch} {
+                set t rb[expr {([llength $open] - 1) % $n}]
+                lassign [lindex $open end] oi ok
+                set open [lrange $open 0 end-1]
+                set cls [string range $cls 0 end-1]
+                if {$oi == $i} {
+                    lset cs $ok $t
+                } else {
+                    if {[lindex $rc $oi $ok] ne $t} {
+                        lset rc $oi $ok $t
+                        if {$oi < $K} {lappend touched $oi}
+                    }
+                }
+                lappend cs $t
+            } else {
+                lappend cs rbbad
+            }
+            incr k
+        }
+        lappend rc $cs
+    }
+    if {$conv >= 0} {
+        # aberturas pendentes a partir de K: simula a pilha adiante até se
+        # saber se cada uma tem par (nível j sai da pilha) ou não (fim)
+        set lo [llength $open]
+        set j 0
+        foreach o $open {
+            if {[lindex $o 0] >= $K} {
+                set lo $j
+                break
+            }
+            incr j
+        }
+        set got {} ;# níveis que encontraram par
+        if {$lo < [llength $open]} {
+            set sim [split $cls ""]
+            for {set i $conv} {$i < $nl && [llength $sim] > $lo} {incr i} {
+                foreach {col ch} [lindex $br $i] {
+                    set jj [string first $ch "(\[\{"]
+                    if {$jj >= 0} {
+                        lappend sim [string index ")\]\}" $jj]
+                    } elseif {[llength $sim] && [lindex $sim end] eq $ch} {
+                        set sim [lrange $sim 0 end-1]
+                        if {[llength $sim] < [llength $open]} {lappend got [llength $sim]}
+                        if {[llength $sim] <= $lo} {break}
+                    }
+                }
+            }
+        }
+        for {set j $lo} {$j < [llength $open]} {incr j} {
+            lassign [lindex $open $j] oi ok
+            lset rc $oi $ok [expr {$j in $got ? "rb[expr {$j % $n}]" : "rbbad"}]
+        }
+        lappend rc {*}[lrange $orc [expr {$conv - $dl}] end]
+        set iend $conv
+    } else {
+        foreach o $open {
+            lassign $o oi ok
+            if {[lindex $rc $oi $ok] ne "rbbad"} {
+                lset rc $oi $ok rbbad
+                if {$oi < $K} {lappend touched $oi}
+            }
+        }
+        set iend $nl
+    }
+    # linhas a retingir: as alteradas antes de K e, de K até iend, as que
+    # mudaram de cor (as do trecho reanalisado sempre)
+    set lines [lsort -integer -unique $touched]
+    for {set i $K} {$i < $iend} {incr i} {
+        set ln [expr {$i + 1}]
+        if {!$inc || ($ln >= $sl && $ln <= $wend)} {
+            lappend lines $i
+        } else {
+            set oi [expr {$i < $sl - 1 ? $i : $i - $dl}]
+            if {[lindex $orc $oi] ne [lindex $rc $i]} {lappend lines $i}
+        }
+    }
+    set rbtags [lmap t $H(tags) {if {[string match rb* $t]} {set t} else continue}]
+    set adds {}
+    set r0 -1
+    set prev -2
+    foreach i [concat $lines [list -9]] {
+        # faixas contínuas para remover as tags antigas
+        if {$i != $prev + 1} {
+            if {$r0 >= 0} {
+                foreach t $rbtags {::qc::_edw tag remove $t [expr {$r0 + 1}].0 "[expr {$prev + 1}].0 lineend"}
+            }
+            set r0 $i
+        }
+        set prev $i
+        if {$i < 0} {break}
+        set ln [expr {$i + 1}]
+        foreach {col ch} [lindex $br $i] t [lindex $rc $i] {
+            dict lappend adds $t $ln.$col $ln.[expr {$col + 1}]
+        }
+    }
+    dict for {t r} $adds {::qc::_edw tag add $t {*}$r}
+    # pilhas: conhecidas até iend; depois dele só os fechos (as aberturas
+    # podem ter mudado de lugar)
+    set nt [expr {$nl - $iend}]
+    if {$inc} {
+        set TB($ed,hlstk) [concat [lrange $ostk 0 $K-1] $stk [lrepeat $nt ?]]
+        set TB($ed,hlcls) [concat [lrange $ocls 0 $K-1] $sc \
+            [expr {$conv >= 0 ? [lrange $ocls [expr {$conv - $dl}] end] : {}}]]
+    } else {
+        set TB($ed,hlstk) $stk
+        set TB($ed,hlcls) $sc
+    }
+    set TB($ed,hlbr) $br
+    set TB($ed,hlrc) $rc
+}
+
+# offset (relativo à linha sl) -> índice do widget text; ws: começo das
+# linhas já alcançadas, ns: começo da seguinte
+proc qc::hlIdx {ws sl ns off} {
+    if {$off >= $ns} {return [expr {$sl + [llength $ws]}].[expr {$off - $ns}]}
+    set L [lsearch -bisect -integer $ws $off]
+    return [expr {$sl + $L}].[expr {$off - [lindex $ws $L]}]
+}
+
+# O que invalida os estados guardados: linguagem e símbolos ligados.
+proc qc::hlSig {} {
+    return [list $::qc::lang $::qc::cfg(pretty) $::qc::H(re)]
+}
+
+# Blocos de recolher: no destaque incremental, só depois de uma pausa.
+proc qc::schedFolds {} {
+    variable foldAfter
+    if {[info exists foldAfter]} {after cancel $foldAfter}
+    set foldAfter [after 400 {
+        unset -nocomplain ::qc::foldAfter
+        qc::computeFolds [$::qc::ed get 1.0 end-1c]
+        qc::schedGutter
+    }]
 }
 
 # offset de caractere -> índice do widget text
@@ -5104,6 +5581,8 @@ proc qc::activateTab {w} {
         setLang $want
     } elseif {$lang ne ""} {
         updateTitle
+        # destaque que ficou pela metade (etapas) ou edições sem destaque
+        if {[info exists TB($w,dirty)]} {schedHighlight}
     }
     $host.sy set {*}[$w yview]
     $host.sx set {*}[$w xview]
@@ -8792,6 +9271,7 @@ qc::language tcl {
     dedentChars "\}"
     autoPairs {() [] \{\} \"\"}
     rainbow  1
+    quoteAtWordStart 1
     tokens {
         comment {(?:^|;)[ \t]*(#[^\n]*)}
         escape  {\\.}
