@@ -4274,29 +4274,37 @@ proc qc::defsIn {text id {qual 0}} {
         lappend starts $o
         incr o [expr {[string length $ln] + 1}]
     }
-    set out {}
-    set seen {}
+    # candidatos {nome posição}: das regexes e do hook defsExtra da
+    # linguagem (nomes criados sem aparecer depois de uma palavra de
+    # definição, ex.: acessores do define-record-type do Scheme)
+    set cands {}
     foreach {re step} $res {
         set m [regexp -all -inline -indices -line -- $re $text]
         for {set i 0} {$i < [llength $m]} {incr i $step} {
             lassign [lindex $m $i+1] a z
             if {$a < 0} {continue}
-            set raw [string range $text $a $z]
-            set key [defKey $raw]
-            if {$key eq "" || [dict exists $kw $key] || [dict exists $seen $a]} {continue}
-            dict set seen $a 1
-            set L [lsearch -bisect -integer $starts $a]
-            set col [expr {$a - [lindex $starts $L]}]
-            set q ""
-            if {$qual} {
-                set q [expr {$qh ne "" ? [$qh $lines $L $raw] : $key}]
-                if {$q eq ""} {continue}
-            }
-            lassign [defSig $lines $L $col] sig E
-            set post [expr {$dstr ? [defDocString $lines $E] : {}}]
-            lappend out [list $key [expr {$L + 1}] $col $sig \
-                [defDoc $lines $L $cpre $cend] $post $q]
+            lappend cands [string range $text $a $z] $a
         }
+    }
+    set xh [hook defsExtra $id]
+    if {$xh ne "" && ![catch {$xh $text} extra]} {lappend cands {*}$extra}
+    set out {}
+    set seen {}
+    foreach {raw a} $cands {
+        set key [defKey $raw]
+        if {$key eq "" || [dict exists $kw $key] || [dict exists $seen $a,$key]} {continue}
+        dict set seen $a,$key 1
+        set L [lsearch -bisect -integer $starts $a]
+        set col [expr {$a - [lindex $starts $L]}]
+        set q ""
+        if {$qual} {
+            set q [expr {$qh ne "" ? [$qh $lines $L $raw] : $key}]
+            if {$q eq ""} {continue}
+        }
+        lassign [defSig $lines $L $col] sig E
+        set post [expr {$dstr ? [defDocString $lines $E] : {}}]
+        lappend out [list $key [expr {$L + 1}] $col $sig \
+            [defDoc $lines $L $cpre $cend] $post $q]
     }
     return $out
 }
@@ -4453,8 +4461,42 @@ proc qc::findDefs {name} {
             }
         }
     }
+    # bibliotecas importadas pelo código (hook importFiles): achadas mesmo
+    # sem pasta aberta; se a definição estiver numa delas, as de arquivos
+    # que não são importados (ex.: cópias antigas) ficam de fora
+    set h [hook importFiles $id]
+    if {$h ne "" && ![catch {$h [$::qc::ed get 1.0 end-1c] $TB($::qc::ed,file)} libs]} {
+        set have $open
+        foreach d $out {dict set have [lindex $d 0] 1}
+        foreach f $libs {
+            if {[dict exists $have $f] || [info exists DX($f)]} {continue}
+            foreach d [importDefs $f $id] {
+                if {[lindex $d 0] eq $key} {lappend out [list $f "" {*}$d]}
+            }
+        }
+        set mine [lmap d $out {
+            if {[lindex $d 1] ne $::qc::ed && [lindex $d 0] ni $libs} {continue}
+            set d
+        }]
+        if {[llength $mine] && [llength $mine] < [llength $out]} {
+            foreach d $mine {
+                if {[lindex $d 1] ne $::qc::ed} {set out $mine; break}
+            }
+        }
+    }
     if {![llength $out]} {set out [apiDefs $id $name]}
     return $out
+}
+
+# Definições de um arquivo importado fora da pasta aberta (cache por mtime).
+proc qc::importDefs {f id} {
+    variable IMPD
+    if {[catch {file mtime $f} mt]} {return {}}
+    if {[info exists IMPD($f)] && [lindex $IMPD($f) 0] == $mt} {return [lindex $IMPD($f) 1]}
+    if {[catch {readFile $f} data]} {return {}}
+    set defs [defsIn $data $id]
+    set IMPD($f) [list $mt $defs]
+    return $defs
 }
 
 # --- índice de biblioteca ---------------------------------------------------
@@ -10443,6 +10485,198 @@ proc qc::lang::scheme::apiSources {} {
 proc qc::lang::scheme::defQual {lines L name} {
     if {[string index [lindex $lines $L] 0] ne "("} {return ""}
     return $name
+}
+
+# Leitor mínimo de s-expressões, para o define-record-type e o import.
+# Lê os itens a partir de text[i] até o ")" que fecha a lista (ou o fim) e
+# deixa i depois dele. Item: {s nome posição} ou {l itens posição}.
+proc qc::lang::scheme::sexpItems {text iVar} {
+    upvar 1 $iVar i
+    set n [string length $text]
+    set out {}
+    while {$i < $n} {
+        set c [string index $text $i]
+        if {[string is space $c]} {
+            incr i
+            continue
+        }
+        switch -- $c {
+            ";" {
+                set j [string first \n $text $i]
+                set i [expr {$j < 0 ? $n : $j + 1}]
+            }
+            "(" - "\[" {
+                set o $i
+                incr i
+                lappend out [list l [sexpItems $text i] $o]
+            }
+            ")" - "\]" {
+                incr i
+                return $out
+            }
+            "\"" {
+                regexp -start $i -indices {\A"(?:[^"\\]|\\.)*"?} $text m
+                set i [expr {[lindex $m 1] + 1}]
+            }
+            "'" - "`" - "," - "@" {incr i}
+            default {
+                if {![regexp -start $i -indices {\A(?:#\\(?:x[0-9a-fA-F]+|[[:alpha:]]+|.)|[^][\s(){}";]+)} $text m]} {
+                    incr i
+                    continue
+                }
+                lassign $m a z
+                lappend out [list s [string range $text $a $z] $a]
+                set i [expr {$z + 1}]
+            }
+        }
+    }
+    return $out
+}
+
+# Nomes criados pelo define-record-type, que não aparecem depois de um
+# "(define": construtor, predicado, acessores e modificadores. R6RS
+#   (define-record-type ponto (fields x (mutable y)))   -> make-ponto ponto?
+#   ponto-x ponto-y ponto-y-set!   (ou os nomes dados: (nome make pred),
+#   (mutable y pega-y muda-y))
+# e SRFI 9/R7RS, com os nomes escritos no próprio formulário:
+#   (define-record-type ponto (make-ponto x y) ponto? (x ponto-x) ...)
+# Devolve {nome posição ...} (posição: onde o nome, ou o campo, aparece).
+proc qc::lang::scheme::defsExtra {text} {
+    set out {}
+    foreach m [regexp -all -inline -indices {\(define-record-type(?=[\s(\[])} $text] {
+        set i [expr {[lindex $m 1] + 1}]
+        if {[catch {sexpItems $text i} items]} {continue}
+        lassign $items spec
+        set rest [lrange $items 1 end]
+        set names {}
+        if {[lindex $spec 0] eq "l"} {
+            # R6RS (nome construtor predicado)
+            lassign [lindex $spec 1] nm c p
+            if {[lindex $nm 0] ne "s"} {continue}
+            lassign $nm - N off
+            foreach x [list $c $p] {
+                if {[lindex $x 0] eq "s"} {lappend names [lindex $x 1] [lindex $x 2]}
+            }
+            set r6 1
+        } elseif {[lindex $spec 0] eq "s"} {
+            lassign $spec - N off
+            set h [lindex $rest 0]
+            set r6 [expr {![llength $rest] || ([lindex $h 0] eq "l" && [lindex $h 1 0 1] in {
+                fields parent protocol sealed opaque nongenerative parent-rtd})}]
+            if {$r6} {lappend names make-$N $off $N? $off}
+        } else {
+            continue
+        }
+        if {$r6} {
+            foreach cl $rest {
+                if {[lindex $cl 0] ne "l" || [lindex $cl 1 0 1] ne "fields"} {continue}
+                foreach f [lrange [lindex $cl 1] 1 end] {
+                    if {[lindex $f 0] eq "s"} {
+                        lappend names $N-[lindex $f 1] [lindex $f 2]
+                        continue
+                    }
+                    lassign [lindex $f 1] kind fn acc mod
+                    if {[lindex $fn 0] ne "s"} {continue}
+                    set fo [lindex $fn 2]
+                    set fname [lindex $fn 1]
+                    lappend names [expr {$acc ne "" ? [lindex $acc 1] : "$N-$fname"}] \
+                        [expr {$acc ne "" ? [lindex $acc 2] : $fo}]
+                    if {[lindex $kind 1] eq "mutable"} {
+                        lappend names [expr {$mod ne "" ? [lindex $mod 1] : "$N-$fname-set!"}] \
+                            [expr {$mod ne "" ? [lindex $mod 2] : $fo}]
+                    }
+                }
+            }
+        } else {
+            lassign $rest c p
+            if {[lindex $c 0] eq "l"} {set c [lindex $c 1 0]}
+            foreach x [list $c $p] {
+                if {[lindex $x 0] eq "s"} {lappend names [lindex $x 1] [lindex $x 2]}
+            }
+            foreach f [lrange $rest 2 end] {
+                if {[lindex $f 0] ne "l"} {continue}
+                foreach x [lrange [lindex $f 1] 1 2] {
+                    if {[lindex $x 0] eq "s"} {lappend names [lindex $x 1] [lindex $x 2]}
+                }
+            }
+        }
+        foreach {nm o} $names {
+            if {[string index $nm 0] ne "#"} {lappend out $nm $o}
+        }
+    }
+    return $out
+}
+
+# Bibliotecas citadas nos (import ...) do texto: lista de nomes, cada um
+# uma lista de símbolos ((web router) -> {web router}). Desembrulha only,
+# except, prefix, rename, for e library.
+proc qc::lang::scheme::importSpecs {text} {
+    set out {}
+    foreach m [regexp -all -inline -indices {\(import(?=[\s(\[)])} $text] {
+        set i [expr {[lindex $m 1] + 1}]
+        if {[catch {sexpItems $text i} items]} {continue}
+        foreach it $items {
+            while {
+                [lindex $it 0] eq "l"
+                && [lindex $it 1 0 1] in {only except prefix rename for library}
+            } {set it [lindex $it 1 1]}
+            if {[lindex $it 0] ne "l"} {continue}
+            set names {}
+            foreach c [lindex $it 1] {
+                if {[lindex $c 0] eq "s"} {lappend names [lindex $c 1]}
+            }
+            if {[llength $names]} {lappend out $names}
+        }
+    }
+    return $out
+}
+
+# Arquivos das bibliotecas do projeto importadas pelo código:
+# (import (web router)) -> web/router.sls (ou .sld, .ss, .scm), procurado a
+# partir da pasta do arquivo, das acima dela e da pasta aberta. Segue os
+# imports das bibliotecas encontradas (até 3 níveis).
+proc qc::lang::scheme::importFiles {text file} {
+    set bases {}
+    if {$file ne ""} {
+        set d [file dirname $file]
+        for {set k 0} {$k < 5} {incr k} {
+            lappend bases $d
+            set up [file dirname $d]
+            if {$up eq $d} {break}
+            set d $up
+        }
+    }
+    set fo $::qc::cfg(folder)
+    if {$fo ne "" && $fo ni $bases} {lappend bases $fo}
+    set out {}
+    set seen {}
+    set queue [list $text]
+    for {set depth 0} {$depth < 3 && [llength $queue]} {incr depth} {
+        set next {}
+        foreach t $queue {
+            foreach spec [importSpecs $t] {
+                if {[dict exists $seen $spec]} {continue}
+                dict set seen $spec 1
+                set rel [join $spec /]
+                set hit ""
+                foreach b $bases {
+                    foreach e {.sls .sld .ss .scm} {
+                        set f [file join $b $rel$e]
+                        if {[file isfile $f]} {
+                            set hit [file normalize $f]
+                            break
+                        }
+                    }
+                    if {$hit ne ""} {break}
+                }
+                if {$hit eq "" || $hit in $out} {continue}
+                lappend out $hit
+                if {![catch {::qc::readFile $hit} data]} {lappend next $data}
+            }
+        }
+        set queue $next
+    }
+    return $out
 }
 
 # guile-procedures.txt: blocos separados por form feed, cada um com uma ou
