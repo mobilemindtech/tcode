@@ -82,6 +82,8 @@ namespace eval qc {
     variable hlAfter ""
     variable gutPending 0
     variable curPending 0
+    variable btnDown 0
+    variable occPending 0
     variable linkSeq 0
     variable foldSeq 0 ;# tags fold:N dos blocos recolhidos
     variable mcur {} ;# ids dos cursores extras (multi-cursor)
@@ -113,7 +115,7 @@ namespace eval qc {
         fontsize 11 wrap 0 autoclear 1 recent {} geometry 1100x800
         lastdir "" lang "" folder "" sidebar 0 sidew 240 autocomp 1
         terminal 0 termpos side termcmd "" tabs {} tabcur "" hoverdef 1
-        pretty 1 mdpreview 1 mdw 0 recentdirs {} floats {}
+        pretty 1 mdpreview 1 mdw 0 recentdirs {} floats {} saverun 0
         rulers {80 120} rulerson 1 indentguides 1
     }
     variable T ;# terminal embutido: T(chan), T(pid), T(shown)
@@ -131,7 +133,7 @@ namespace eval qc {
         conbg    #1e1f22   confg    #c8c8c8
         stderr   #ff6b68   warn     #e0c46c   info     #6f7f8f
         result   #8fbf6a   thumbact #64666d   ruler    #3a3b40
-        indguide #34353a   indguideact #6b6d74
+        indguide #34353a   indguideact #6b6d74   occ #2f3e58
     }
     # Tags de destaque de sintaxe: cor e estilo (B negrito, I itálico)
     variable S {
@@ -386,6 +388,8 @@ proc qc::setupTheme {} {
     option add *Menu.relief flat
     option add *Menu.activeBorderWidth 0
     option add *Menu.borderWidth 1
+    # marca das opções de menu (o selectColor da paleta some no fundo)
+    option add *Menu.selectColor $C(uifg)
     option add *TCombobox*Listbox.background $C(field)
     option add *TCombobox*Listbox.foreground $C(edfg)
 
@@ -590,6 +594,7 @@ proc qc::buildMenus {} {
     $m add separator
     $m add command -label "Salvar" -accelerator Ctrl+S -command qc::save
     $m add command -label "Salvar como…" -accelerator Ctrl+Shift+S -command qc::saveAs
+    $m add command -label "Salvar todos" -accelerator Ctrl+Alt+S -command qc::saveAll
     $m add command -label "Exportar para HTML…" -accelerator Ctrl+Shift+E -command qc::mdExport
     $m add command -label "Abrir no navegador" -command qc::mdBrowser
     $m add command -label "Fechar aba" -accelerator Ctrl+F4 -command qc::closeFile
@@ -658,6 +663,7 @@ proc qc::buildMenus {} {
     $m add separator
     $m add command -label "Limpar saída" -accelerator Ctrl+W -command qc::clearConsole
     $m add checkbutton -label "Limpar saída antes de executar" -variable ::qc::cfg(autoclear)
+    $m add checkbutton -label "Salvar todos ao executar" -variable ::qc::cfg(saverun)
     $m add separator
     $m add command -label "Opções de execução…" -accelerator Ctrl+E -command qc::optionsDialog
 
@@ -776,6 +782,7 @@ proc qc::setupEdTags {ed} {
     $ed tag configure bmatch -background $C(bmatch) -font QcMonoB
     $ed tag configure bbad -background $C(bbad)
     $ed tag configure msel -background $C(sel)
+    $ed tag configure occ -background $C(occ)
     $ed tag configure deflink -underline 1
     $ed tag configure pel -elide 1
     $ed tag lower curline
@@ -820,6 +827,7 @@ proc qc::setupBindings {} {
         <Control-o>         qc::openFile
         <Control-s>         qc::save
         <Control-S>         qc::saveAs
+        <Control-Alt-s>     qc::saveAll
         <Control-F4>        qc::closeFile
         <Control-Tab>       {qc::cycleTab 1}
         <Control-Shift-Tab> {qc::cycleTab -1}
@@ -894,6 +902,10 @@ proc qc::setupBindings {} {
     bind QcEdit <<Paste>> {qc::paste %W; break}
     bind QcEdit <Control-MouseWheel> {qc::zoom [expr {%D > 0 ? 1 : -1}]; break}
     bind QcEdit <Button-3> {qc::edPopup %W %x %y %X %Y; break}
+    # arrasto com o mouse: a âncora da seleção é do Tk (ver qc::syncAnchor)
+    bind QcEdit <ButtonPress-1> {set ::qc::btnDown 1}
+    bind QcEdit <ButtonRelease-1> {set ::qc::btnDown 0; qc::onCursor}
+    bind QcEdit <<Selection>> {if {"%W" eq $::qc::ed} qc::onCursor}
     bind QcEdit <<Undo>> {qc::editCmd undo; break}
     bind QcEdit <<Redo>> {qc::editCmd redo; break}
 
@@ -917,7 +929,7 @@ proc qc::setupBindings {} {
         bind QcHover <KeyPress-$k> {qc::tipHide; qc::linkAtPointer %W}
         bind QcHover <KeyRelease-$k> qc::linkClear
     }
-    bind QcHover <KeyPress> qc::tipHide
+    bind QcHover <KeyPress> {qc::tipHide; set ::qc::btnDown 0}
     bind QcHover <Button> qc::tipHide
     bind QcHover <MouseWheel> qc::tipHide
 
@@ -2491,6 +2503,7 @@ proc qc::edYscroll {w args} {
     schedGutter
     mdSync
     if {[llength $::qc::mcur]} {after idle {qc::drawCarets}}
+    if {[llength [::qc::_edw tag ranges occ]] || [llength [::qc::_edw tag ranges sel]]} {occSched}
 }
 
 proc qc::edXscroll {w args} {
@@ -3163,6 +3176,57 @@ proc qc::updateCursor {} {
     prettyCursor
     schedGutter
     drawCarets
+    syncAnchor
+    occHighlight
+}
+
+# Shift+setas e Shift+clique estendem a seleção a partir da âncora do Tk,
+# que só muda num clique: depois de mover o cursor pelo teclado (Home,
+# setas, Ctrl+G…) ou de uma seleção feita pelo nosso código (Shift+Home,
+# Ctrl+D, Localizar…), a seleção partia do lugar do último clique e perdia
+# o começo. Fora de um arrasto do mouse, a âncora fica no cursor (sem
+# seleção) ou na ponta da seleção oposta a ele.
+proc qc::syncAnchor {} {
+    variable ed
+    variable btnDown
+    if {$btnDown} {return}
+    set name [expr {[info commands ::tk::TextAnchor] ne "" ? [tk::TextAnchor $ed] : "anchor"}]
+    if {![llength [::qc::_edw tag ranges sel]]} {
+        set a insert
+    } else {
+        set a [expr {[::qc::_edw compare insert == sel.first] ? "sel.last" : "sel.first"}]
+    }
+    ::qc::_edw mark set $name $a
+}
+
+# Palavra selecionada: destaca as outras ocorrências dela (palavra inteira)
+# na parte visível do editor; refeito ao rolar (ver qc::edYscroll).
+proc qc::occSched {} {
+    variable occPending
+    if {!$occPending} {
+        set occPending 1
+        after idle {qc::occHighlight}
+    }
+}
+
+proc qc::occHighlight {} {
+    variable ed
+    variable occPending 0
+    if {![winfo exists $ed]} {return}
+    ::qc::_edw tag remove occ 1.0 end
+    set r [::qc::_edw tag ranges sel]
+    if {[llength $r] != 2} {return}
+    lassign $r a b
+    if {[lindex [split $a .] 0] != [lindex [split $b .] 0]} {return}
+    set w [::qc::_edw get $a $b]
+    if {![regexp {^\w+$} $w]} {return}
+    set top [::qc::_edw index "@0,0 linestart"]
+    set bot [::qc::_edw index "@0,[winfo height $ed] lineend"]
+    set lens {}
+    set hits [::qc::_edw search -all -regexp -count lens -- "\\m$w\\M" $top $bot]
+    foreach i $hits n $lens {
+        if {$i ne $a} {::qc::_edw tag add occ $i "$i +${n}c"}
+    }
 }
 
 # --- símbolos no lugar de palavras (chave "pretty" da linguagem) -----------
@@ -6404,6 +6468,29 @@ proc qc::saveAs {} {
     return [fmtAfterSave [saveTo [file normalize $path]]]
 }
 
+# Salva todas as abas modificadas. Com ask, as sem arquivo pedem um nome
+# (Salvar como); sem ask, são deixadas como estão. Devolve 0 se algum
+# salvamento falhou ou foi cancelado.
+proc qc::saveAll {{ask 1}} {
+    variable ed
+    set cur $ed
+    set ok 1
+    set n 0
+    foreach w $::qc::tabs {
+        if {![winfo exists $w] || ![$w edit modified]} {continue}
+        set f $::qc::TB($w,file)
+        if {$f ne ""} {
+            if {[saveTo $f $w]} {incr n} else {set ok 0}
+        } elseif {$ask} {
+            activateTab $w
+            if {[saveAs]} {incr n} else {set ok 0}
+        }
+    }
+    if {$ed ne $cur && [winfo exists $cur]} {activateTab $cur}
+    set ::qc::status [expr {$n ? "$n arquivo(s) salvo(s)" : "Nada a salvar"}]
+    return $ok
+}
+
 # Salva o editor w (padrão: a aba ativa) em path.
 proc qc::saveTo {path {w ""}} {
     variable ed
@@ -6644,6 +6731,7 @@ proc qc::run {selOnly} {
         set ::qc::status "Já existe uma execução em andamento (Ctrl+Break para interromper)"
         return
     }
+    if {$cfg(saverun) && ![saveAll 0]} {return}
     set lineoff 0
     if {$selOnly} {
         if {![llength [$ed tag ranges sel]]} {
