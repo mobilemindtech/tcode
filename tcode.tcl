@@ -7811,51 +7811,104 @@ proc qc::termDialogApply {} {
 # ---------------------------------------------------------------------------
 
 proc qc::showShortcuts {} {
-    tk_messageBox -parent . -title "Atalhos" -message "Atalhos de teclado" -detail [join {
-        "Ctrl+R / Ctrl+Enter   Executar arquivo"
-        "Ctrl+Shift+R          Executar seleção"
-        "Ctrl+Alt+R            Executar comando do projeto (.qconsole)"
-        "Ctrl+Break            Interromper execução"
-        "Ctrl+W                Limpar saída"
-        "Ctrl+E                Opções de execução"
-        ""
-        "Ctrl+N / O / S        Novo / Abrir / Salvar"
-        "Ctrl+Shift+S          Salvar como"
-        "Ctrl+Shift+O          Abrir pasta"
-        "Ctrl+B                Painel de arquivos"
-        "F2 / Del (no painel)  Renomear / excluir arquivo ou pasta"
-        "Ctrl+Shift+M          Pré-visualização do Markdown"
-        "Ctrl+Shift+E          Exportar Markdown para HTML"
-        "Ctrl+' / Ctrl+`       Terminal"
-        "Ctrl+F4               Fechar aba"
-        "Ctrl+Tab / Ctrl+PgDn  Próxima aba"
-        "Ctrl+Shift+Tab / PgUp Aba anterior"
-        "Ctrl+Shift+T          Desacoplar / acoplar aba"
-        "Ctrl+Q                Sair"
-        ""
-        "Ctrl+Z / Ctrl+Y       Desfazer / Refazer"
-        "Ctrl+F / Ctrl+H       Localizar / Substituir"
-        "F3 / Shift+F3         Próximo / Anterior"
-        "Ctrl+G / Ctrl+L       Ir para linha"
-        "Ctrl+Shift+L          Listar TODOs/FIXMEs"
-        "F12 / Alt+←           Ir para definição / Voltar"
-        "Ctrl+D                Selecionar próxima ocorrência"
-        "Alt+F3                Selecionar todas as ocorrências"
-        "Ctrl+Clique           Ir para definição (nome sublinhado)"
-        "                      ou adicionar cursor"
-        "Alt+Clique            Adicionar cursor"
-        "Shift+Alt+↑ / ↓       Adicionar cursor acima / abaixo"
-        "Esc                   Voltar a um cursor"
-        "Ctrl+Shift+D          Duplicar linha"
-        "Ctrl+Shift+↑ / ↓      Mover linha para cima / baixo"
-        "Ctrl+Shift+\[ / \]      Recolher / expandir bloco"
-        "Ctrl+/                Comentar linhas"
-        "Ctrl+Shift+F          Formatar código"
-        "F8                    Verificar código (linter)"
-        "Ctrl+Espaço           Completar palavra"
-        "Tab / Shift+Tab       Indentar / Desindentar"
-        "Ctrl+ + / - / 0       Tamanho da fonte"
-    } \n]
+    variable C
+    set w .shortcuts
+    if {[winfo exists $w]} {raise $w; focus $w; return}
+    # cada coluna: lista de grupos {título {atalho descrição ...}}
+    set cols {
+        {
+            {"Executar" {
+                "Ctrl+R / Ctrl+Enter"    "Executar arquivo"
+                "Ctrl+Shift+R"           "Executar seleção"
+                "Ctrl+Alt+R"             "Executar comando do projeto (.qconsole)"
+                "Ctrl+Break"             "Interromper execução"
+                "Ctrl+W"                 "Limpar saída"
+                "Ctrl+E"                 "Opções de execução"
+            }}
+            {"Arquivos e abas" {
+                "Ctrl+N / O / S"         "Novo / Abrir / Salvar"
+                "Ctrl+Shift+S"           "Salvar como"
+                "Ctrl+Shift+O"           "Abrir pasta"
+                "Ctrl+B"                 "Painel de arquivos"
+                "F2 / Del (no painel)"   "Renomear / excluir arquivo ou pasta"
+                "Ctrl+Shift+M"           "Pré-visualização do Markdown"
+                "Ctrl+Shift+E"           "Exportar Markdown para HTML"
+                "Ctrl+' / Ctrl+`"        "Terminal"
+                "Ctrl+F4"                "Fechar aba"
+                "Ctrl+Tab / Ctrl+PgDn"   "Próxima aba"
+                "Ctrl+Shift+Tab / PgUp"  "Aba anterior"
+                "Ctrl+Shift+T"           "Desacoplar / acoplar aba"
+                "Ctrl+Q"                 "Sair"
+            }}
+        }
+        {
+            {"Navegação e busca" {
+                "Ctrl+F / Ctrl+H"        "Localizar / Substituir"
+                "F3 / Shift+F3"          "Próximo / Anterior"
+                "Ctrl+G / Ctrl+L"        "Ir para linha"
+                "Ctrl+Shift+L"           "Listar TODOs/FIXMEs"
+                "F12 / Alt+←"            "Ir para definição / Voltar"
+                "Ctrl+Clique"            "Ir para definição (nome sublinhado)"
+            }}
+            {"Edição" {
+                "Ctrl+Z / Ctrl+Y"        "Desfazer / Refazer"
+                "Ctrl+Shift+D"           "Duplicar linha"
+                "Ctrl+Shift+↑ / ↓"       "Mover linha para cima / baixo"
+                "Ctrl+Shift+\[ / \]"     "Recolher / expandir bloco"
+                "Ctrl+/"                 "Comentar linhas"
+                "Tab / Shift+Tab"        "Indentar / Desindentar"
+                "Ctrl+Espaço"            "Completar palavra"
+                "Ctrl+Shift+F"           "Formatar código"
+                "F8"                     "Verificar código (linter)"
+            }}
+            {"Vários cursores" {
+                "Ctrl+D"                 "Selecionar próxima ocorrência"
+                "Alt+F3"                 "Selecionar todas as ocorrências"
+                "Alt+Clique"             "Adicionar cursor"
+                "Ctrl+Clique"            "Adicionar cursor (fora de um nome)"
+                "Shift+Alt+↑ / ↓"        "Adicionar cursor acima / abaixo"
+                "Esc"                    "Voltar a um cursor"
+            }}
+            {"Visualização" {
+                "Ctrl+ + / - / 0"        "Tamanho da fonte"
+            }}
+        }
+    }
+    toplevel $w -background $C(ui)
+    wm title $w "Atalhos de teclado"
+    wm transient $w .
+    wm resizable $w 0 0
+    set bold [font actual TkDefaultFont]
+    dict set bold -weight bold
+    set mono [list [font actual QcMono -family] [font actual TkDefaultFont -size]]
+    ttk::frame $w.f -padding 14
+    pack $w.f -fill both -expand 1
+    set ci 0
+    foreach col $cols {
+        set c [ttk::frame $w.f.c$ci]
+        grid $c -row 0 -column $ci -sticky nw -padx [expr {$ci ? {24 0} : 0}]
+        set r 0
+        foreach grp $col {
+            lassign $grp title items
+            label $c.h$r -text $title -font $bold -background $C(ui) -foreground $C(accent)
+            grid $c.h$r -row $r -column 0 -columnspan 2 -sticky w -pady [expr {$r ? {10 2} : {0 2}}]
+            incr r
+            foreach {k d} $items {
+                label $c.k$r -text $k -font $mono -background $C(ui) -foreground $C(edfg)
+                ttk::label $c.d$r -text $d
+                grid $c.k$r -row $r -column 0 -sticky w -padx {8 12}
+                grid $c.d$r -row $r -column 1 -sticky w
+                incr r
+            }
+        }
+        incr ci
+    }
+    ttk::button $w.f.ok -text Fechar -command [list destroy $w]
+    grid $w.f.ok -row 1 -column 0 -columnspan 2 -sticky e -pady {14 0}
+    bind $w <Escape> [list destroy $w]
+    bind $w <Return> [list destroy $w]
+    wm geometry $w +[expr {[winfo rootx .] + 60}]+[expr {[winfo rooty .] + 40}]
+    focus $w
 }
 
 proc qc::about {} {
