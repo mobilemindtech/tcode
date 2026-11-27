@@ -115,7 +115,7 @@ namespace eval qc {
         fontsize 11 wrap 0 autoclear 1 recent {} geometry 1100x800
         lastdir "" lang "" folder "" sidebar 0 sidew 240 autocomp 1
         terminal 0 termpos side termcmd "" tabs {} tabcur "" hoverdef 1
-        pretty 1 mdpreview 1 mdw 0 recentdirs {} floats {} saverun 0
+        pretty 1 mdpreview 1 mdw 0 recentdirs {} floats {} saverun 0 unused 1
         rulers {80 120} rulerson 1 indentguides 1
     }
     variable T ;# terminal embutido: T(chan), T(pid), T(shown)
@@ -134,6 +134,7 @@ namespace eval qc {
         stderr   #ff6b68   warn     #e0c46c   info     #6f7f8f
         result   #8fbf6a   thumbact #64666d   ruler    #3a3b40
         indguide #34353a   indguideact #6b6d74   occ #2f3e58
+        unused   #6c6c6c
     }
     # Tags de destaque de sintaxe: cor e estilo (B negrito, I itálico)
     variable S {
@@ -638,6 +639,7 @@ proc qc::buildMenus {} {
     $m add command -label "Ir para definição" -accelerator F12 -command qc::goToDefinition
     $m add command -label "Voltar" -accelerator Alt+← -command qc::navBack
     $m add command -label "Listar TODOs…" -accelerator Ctrl+Shift+L -command qc::todoList
+    $m add command -label "Listar definições não usadas…" -command qc::unusedList
 
     set m [menu .mb.lang -tearoff 0]
     .mb add cascade -label Linguagem -menu $m
@@ -686,6 +688,8 @@ proc qc::buildMenus {} {
     $m add separator
     $m add checkbutton -label "Mostrar definição ao passar o mouse" -variable ::qc::cfg(hoverdef) \
         -command qc::tipHide
+    $m add checkbutton -label "Apagar definições não usadas" -variable ::qc::cfg(unused) \
+        -command {qc::unusedSched 0}
     $m add checkbutton -label "Símbolos no lugar de palavras (define, lambda → λ)" \
         -variable ::qc::cfg(pretty) -command qc::highlight
     $m add checkbutton -label "Painel de arquivos" -accelerator Ctrl+B \
@@ -784,6 +788,7 @@ proc qc::setupEdTags {ed} {
     $ed tag configure msel -background $C(sel)
     $ed tag configure occ -background $C(occ)
     $ed tag configure deflink -underline 1
+    $ed tag configure unused -foreground $C(unused)
     $ed tag configure pel -elide 1
     $ed tag lower curline
 }
@@ -1913,7 +1918,9 @@ proc qc::compileLang {} {
         }
         ::qc::_edw tag configure $t {*}$opts
     }
-    foreach t [concat $H(subtags) warnline errline found bmatch bbad sel] {::qc::_edw tag raise $t}
+    foreach t [concat $H(subtags) unused warnline errline found bmatch bbad sel] {
+        ::qc::_edw tag raise $t
+    }
     ::qc::_edw tag lower curline
 }
 
@@ -3152,6 +3159,7 @@ proc qc::onChange {} {
     schedHighlight
     mdSched
     schedGutter
+    unusedSched
     onCursor
 }
 
@@ -4102,6 +4110,7 @@ proc qc::projIndexClear {} {
     variable PL
     after cancel $PS(after)
     array set PS {root "" dirs {} files {} seen {} n 0 done 0}
+    array unset ::qc::PK
     array unset ::qc::DX
     array unset ::qc::DN
     array unset PX
@@ -4153,6 +4162,7 @@ proc qc::projIndexFile {f} {
     variable PX
     variable PW
     variable PL
+    variable PK
     variable acMaxSize
     if {[catch {file mtime $f} mt] || [catch {file size $f} sz] || $sz > $acMaxSize} {
         projForget $f
@@ -4170,13 +4180,15 @@ proc qc::projIndexFile {f} {
     set PX($f) [list $mt $ext $words]
     defIndexFile $f $id $data
     foreach w $words {incr PW($ext,$w)}
-    unset -nocomplain PL($ext)
+    unset -nocomplain PL($ext) PK($ext)
+    unusedSched
 }
 
 proc qc::projForget {f} {
     variable PX
     variable PW
     variable PL
+    variable PK
     if {![info exists PX($f)]} {return}
     lassign $PX($f) - ext words
     foreach w $words {
@@ -4184,7 +4196,7 @@ proc qc::projForget {f} {
     }
     unset PX($f)
     defForget $f
-    unset -nocomplain PL($ext)
+    unset -nocomplain PL($ext) PK($ext)
 }
 
 proc qc::projWords {ext} {
@@ -4274,20 +4286,7 @@ proc qc::defsIn {text id {qual 0}} {
         lappend starts $o
         incr o [expr {[string length $ln] + 1}]
     }
-    # candidatos {nome posição}: das regexes e do hook defsExtra da
-    # linguagem (nomes criados sem aparecer depois de uma palavra de
-    # definição, ex.: acessores do define-record-type do Scheme)
-    set cands {}
-    foreach {re step} $res {
-        set m [regexp -all -inline -indices -line -- $re $text]
-        for {set i 0} {$i < [llength $m]} {incr i $step} {
-            lassign [lindex $m $i+1] a z
-            if {$a < 0} {continue}
-            lappend cands [string range $text $a $z] $a
-        }
-    }
-    set xh [hook defsExtra $id]
-    if {$xh ne "" && ![catch {$xh $text} extra]} {lappend cands {*}$extra}
+    set cands [defCands $text $id]
     set out {}
     set seen {}
     foreach {raw a} $cands {
@@ -4307,6 +4306,24 @@ proc qc::defsIn {text id {qual 0}} {
             [defDoc $lines $L $cpre $cend] $post $q]
     }
     return $out
+}
+
+# Candidatos a definição {nome posição ...}: das regexes e do hook
+# defsExtra da linguagem (nomes criados sem aparecer depois de uma palavra
+# de definição, ex.: acessores do define-record-type do Scheme).
+proc qc::defCands {text id} {
+    set cands {}
+    foreach {re step} [lindex [defRegexes $id] 0] {
+        set m [regexp -all -inline -indices -line -- $re $text]
+        for {set i 0} {$i < [llength $m]} {incr i $step} {
+            lassign [lindex $m $i+1] a z
+            if {$a < 0} {continue}
+            lappend cands [string range $text $a $z] $a
+        }
+    }
+    set xh [hook defsExtra $id]
+    if {$xh ne "" && ![catch {$xh $text} extra]} {lappend cands {*}$extra}
+    return $cands
 }
 
 # Assinatura: a linha da definição e, se os parênteses abertos a partir do
@@ -4721,6 +4738,162 @@ proc qc::todoGo {idx} {
     gotoLine $line $col
 }
 
+# --- definições não usadas ---------------------------------------------------
+# Uma definição (proc, função, define…) cujo nome só aparece nas próprias
+# definições recebe a tag unused (cor apagada). Contam como uso: qualquer
+# ocorrência da palavra no arquivo (inclusive em strings e comentários, para
+# não marcar callbacks como "-command qc::x"), nas outras abas abertas e nos
+# arquivos da pasta (índice do autocompletar). Nomes qualificados contam
+# pelo nome sem o namespace (qc::x = x). É uma heurística: nomes montados em
+# tempo de execução ("cmd$tipo") não são vistos.
+
+namespace eval qc {
+    variable PK ;# PK(<ext>) = dict nome sem namespace -> palavras da pasta
+    array set PK {}
+    variable unusedAfter ""
+    variable unusedSkip {main}
+}
+
+proc qc::unusedSched {{ms 700}} {
+    variable unusedAfter
+    after cancel $unusedAfter
+    set unusedAfter [after $ms qc::unusedUpdate]
+}
+
+# dict nome sem namespace -> nº de ocorrências, a partir de um dict
+# palavra -> nº.
+proc qc::unusedKeys {ct} {
+    set out [dict create]
+    dict for {w n} $ct {dict incr out [defKey $w] $n}
+    return $out
+}
+
+proc qc::unusedFolderKeys {ext} {
+    variable PW
+    variable PK
+    if {![info exists PK($ext)]} {
+        set n [string length $ext]
+        set d [dict create]
+        foreach k [array names PW $ext,*] {
+            dict lappend d [defKey [string range $k $n+1 end]] [string range $k $n+1 end]
+        }
+        set PK($ext) $d
+    }
+    return $PK($ext)
+}
+
+# Lista {nome início fim} das definições não usadas do editor w.
+proc qc::unusedFind {w} {
+    variable TB
+    variable PW
+    variable PX
+    variable unusedSkip
+    set id $TB($w,lang)
+    if {$id eq ""} {set id $::qc::lang}
+    if {$id eq ""} {return {}}
+    lassign [defRegexes $id] res kw
+    if {![llength $res]} {return {}}
+    set text [$w get 1.0 end-1c]
+    set cands [defCands $text $id]
+    if {![llength $cands]} {return {}}
+    # ocorrências no arquivo (índice do autocompletar, completado na hora)
+    while {![acIndex $w 5000]} {}
+    set here [unusedKeys $TB($w,acct)]
+    # outras abas abertas (índice delas, se já foi montado)
+    set others [dict create]
+    foreach t $::qc::tabs {
+        if {$t ne $w && [info exists TB($t,acct)] && ![info exists TB($t,acdirty)]} {
+            dict for {k n} [unusedKeys $TB($t,acct)] {dict incr others $k $n}
+        }
+    }
+    # arquivos da pasta, menos a versão gravada deste arquivo
+    set f $TB($w,file)
+    set ext [string tolower [file extension $f]]
+    if {$ext eq ""} {set ext [string tolower [lindex [lget ext $id] 0]]}
+    set fk [unusedFolderKeys $ext]
+    set mine [expr {$f ne "" && [info exists PX($f)] ? [lindex $PX($f) 2] : {}}]
+    # definições por nome
+    set defs [dict create]
+    set seen {}
+    foreach {raw a} $cands {
+        set key [defKey $raw]
+        if {
+            [string length $key] < 3 || [dict exists $kw $key] || $key in $unusedSkip
+            || [dict exists $seen $a]
+        } {continue}
+        dict set seen $a 1
+        dict lappend defs $key [list $raw $a]
+    }
+    set starts {}
+    set o 0
+    foreach ln [split $text \n] {
+        lappend starts $o
+        incr o [expr {[string length $ln] + 1}]
+    }
+    set out {}
+    dict for {key ds} $defs {
+        set n [expr {[dict exists $here $key] ? [dict get $here $key] : 0}]
+        # n = 0: o nome não casa com a regex de palavra; não dá para julgar
+        if {$n == 0 || $n > [llength $ds] || [dict exists $others $key]} {continue}
+        set used 0
+        if {[dict exists $fk $key]} {
+            foreach v [dict get $fk $key] {
+                set c $PW($ext,$v)
+                if {[lsearch -sorted $mine $v] >= 0} {incr c -1}
+                if {$c > 0} {set used 1; break}
+            }
+        }
+        if {$used} {continue}
+        foreach d $ds {
+            lassign $d raw a
+            set L [lsearch -bisect -integer $starts $a]
+            set col [expr {$a - [lindex $starts $L]}]
+            incr L
+            lappend out [list $key $L.$col $L.[expr {$col + [string length $raw]}]]
+        }
+    }
+    return [lsort -dictionary -index 1 $out]
+}
+
+proc qc::unusedUpdate {} {
+    variable ed
+    variable cfg
+    if {$ed eq "" || ![winfo exists $ed]} {return}
+    ::qc::_edw tag remove unused 1.0 end
+    if {!$cfg(unused)} {return}
+    foreach d [unusedFind $ed] {
+        ::qc::_edw tag add unused {*}[lrange $d 1 2]
+    }
+}
+
+# Menu com as definições não usadas do arquivo; escolher uma leva até ela.
+proc qc::unusedList {} {
+    variable ed
+    set ds [unusedFind $ed]
+    if {![llength $ds]} {
+        set ::qc::status "Nenhuma definição não usada neste arquivo"
+        return
+    }
+    set m .unusedpop
+    destroy $m
+    menu $m -tearoff 0
+    set k 0
+    foreach d $ds {
+        if {[incr k] > 60} {
+            $m add command -label "… mais [expr {[llength $ds] - 60}]" -state disabled
+            break
+        }
+        lassign $d name a
+        $m add command -label [format "%5d   %s" [lindex [split $a .] 0] $name] \
+            -command [list qc::todoGo $a]
+    }
+    set ::qc::status "[llength $ds] definição(ões) não usada(s)"
+    set bb [$ed bbox insert]
+    if {![llength $bb]} {set bb {0 0 0 0}}
+    tk_popup $m [expr {[winfo rootx $ed] + [lindex $bb 0]}] \
+        [expr {[winfo rooty $ed] + [lindex $bb 1] + [lindex $bb 3]}]
+}
+
 proc qc::gotoDef {d} {
     lassign $d f w name line col
     navPush
@@ -4903,6 +5076,9 @@ proc qc::tipShow {w wd x y} {
     }
     if {[llength $defs] > $n} {
         $t.t insert end "+[expr {[llength $defs] - $n}] outras (F12 para escolher)\n" loc
+    }
+    if {"unused" in [::qc::_edw tag names $a]} {
+        $t.t insert end "Não usada (nem neste arquivo, nem nas abas e na pasta)\n" loc
     }
     $t.t delete end-1c
     set wmax 10
@@ -5922,6 +6098,7 @@ proc qc::activateTab {w} {
         if {[info exists TB($w,dirty)]} {schedHighlight}
     }
     acSched $w
+    unusedSched 100
     $host.sy set {*}[$w yview]
     $host.sx set {*}[$w xview]
     if {[winfo ismapped [fb]]} {markAll}
@@ -6482,6 +6659,7 @@ proc qc::openFile {{path ""}} {
     set id [langForFile $file $data]
     if {$id ne "" && $id ne $::qc::lang} {setLang $id}
     setContent $data
+    set ::qc::TB($::qc::ed,sig) [fileSig $file]
     addRecent $file
     treeReveal
     set ::qc::status "Aberto: $file"
@@ -6539,6 +6717,7 @@ proc qc::saveTo {path {w ""}} {
     variable cfg
     variable TB
     if {$w eq ""} {set w $ed}
+    if {![diskSaveOk $w $path]} {return 0}
     set fmtErr [formatOnSave $w]
     set data [$w get 1.0 end-1c]
     if {$data ne "" && [string index $data end] ne "\n"} {append data \n}
@@ -6548,6 +6727,7 @@ proc qc::saveTo {path {w ""}} {
         return 0
     }
     set TB($w,file) $path
+    set TB($w,sig) [fileSig $path]
     set cfg(lastdir) [file dirname $path]
     $w edit modified 0
     addRecent $path
@@ -6607,186 +6787,6 @@ proc qc::fmtAfterSave {ok} {
     return $ok
 }
 
-proc qc::addRecent {path} {
-    variable cfg
-    set l [lsearch -all -inline -not -exact $cfg(recent) $path]
-    set cfg(recent) [lrange [linsert $l 0 $path] 0 9]
-    updateRecentMenu
-}
-
-proc qc::addRecentDir {path} {
-    variable cfg
-    set l [lsearch -all -inline -not -exact $cfg(recentdirs) $path]
-    set cfg(recentdirs) [lrange [linsert $l 0 $path] 0 9]
-    updateRecentMenu
-}
-
-proc qc::updateRecentMenu {} {
-    variable cfg
-    foreach {m key cmd} {.mb.file.recent recent qc::openFile
-                         .mb.file.recentdirs recentdirs qc::openFolder} {
-        if {![winfo exists $m]} {continue}
-        $m delete 0 end
-        foreach p $cfg($key) {
-            $m add command -label $p -command [list $cmd $p]
-        }
-        if {![llength $cfg($key)]} {
-            $m add command -label "(vazio)" -state disabled
-        } else {
-            $m add separator
-            $m add command -label "Limpar lista" \
-                -command [list apply {k {set ::qc::cfg($k) {}; qc::updateRecentMenu}} $key]
-        }
-    }
-}
-
-proc qc::quit {} {
-    variable TB
-    variable cfg
-    foreach w $::qc::tabs {
-        if {[$w edit modified]} {
-            activateTab $w
-            if {![confirmDiscard]} {return}
-        }
-    }
-    # abas reabertas na próxima vez
-    set cfg(tabs) {}
-    foreach w $::qc::tabs {
-        if {$TB($w,file) ne ""} {lappend cfg(tabs) $TB($w,file)}
-    }
-    set cfg(tabcur) $TB($::qc::ed,file)
-    set cfg(floats) {}
-    foreach w $::qc::tabs {
-        if {[winfo parent $w] ne ".pw.ed" && $TB($w,file) ne ""} {
-            lappend cfg(floats) [list $TB($w,file) [wm geometry [winfo toplevel $w]]]
-    set ::qc::TB($::qc::ed,sig) [fileSig $file]
-        }
-    }
-    stop
-    termKill
-    saveCfg
-    catch {file delete -force [tmpDir]}
-    exit
-}
-
-# ---------------------------------------------------------------------------
-# Console e execução
-# ---------------------------------------------------------------------------
-
-proc qc::conAppend {text tag} {
-    variable con
-    $con configure -state normal
-    # linhas enormes (saída sem quebra de linha) deixam o widget text muito
-    # lento: quebra a cada 2000 caracteres
-    set col [lindex [split [$con index end-1c] .] 1]
-    $con insert end [wrapLong $text $col 2000] $tag
-    # limita o tamanho do console
-    set lines [lindex [split [$con index end] .] 0]
-    if {$lines > 50000} {$con delete 1.0 [expr {$lines - 40000}].0}
-    $con configure -state disabled
-    # rolar a cada pedaço é caro quando a saída é contínua: uma vez por ciclo
-    variable conSee
-    if {![info exists conSee]} {
-        set conSee 1
-        after idle {unset ::qc::conSee; $::qc::con see end}
-    }
-}
-
-# Quebra os trechos de text que passariam de max caracteres numa linha
-# (col = caracteres já presentes na linha corrente).
-proc qc::wrapLong {text col max} {
-    if {$col + [string length $text] <= $max} {return $text}
-    set out ""
-    foreach seg [split $text \n] {
-        while {$col + [string length $seg] > $max} {
-            set k [expr {max(0, $max - $col)}]
-            append out [string range $seg 0 $k-1] \n
-            set seg [string range $seg $k end]
-            set col 0
-        }
-        append out $seg \n
-        set col 0
-    }
-    return [string range $out 0 end-1]
-}
-
-proc qc::clearConsole {} {
-    variable con
-    $con configure -state normal
-    $con delete 1.0 end
-    $con configure -state disabled
-}
-
-    if {![diskSaveOk $w $path]} {return 0}
-proc qc::setRunning {on} {
-    # terminal no lugar da saída: volta para a saída ao executar
-    if {$on && $::qc::cfg(terminal) && $::qc::cfg(termpos) eq "replace"} {showTerminal 0}
-    set s [expr {$on ? "disabled" : "!disabled"}]
-    set ns [expr {$on ? "!disabled" : "disabled"}]
-    .tb.run state $s
-    .tb.stop state $ns
-    .mb.script entryconfigure 0 -state [expr {$on ? "disabled" : "normal"}]
-    .mb.script entryconfigure 1 -state [expr {$on ? "disabled" : "normal"}]
-    set TB($w,sig) [fileSig $path]
-    .mb.script entryconfigure 2 -state [expr {$on ? "normal" : "disabled"}]
-}
-
-# Nome do arquivo temporário (o do arquivo atual ou script.<ext>) e código
-# a executar, com o hook prepare da linguagem. Retorna dict name code mode.
-proc qc::prepareCode {code selOnly} {
-    variable file
-    set exts [lget ext]
-    set ext [string tolower [file extension $file]]
-    set name [expr {$file ne "" && $ext in $exts ? [file tail $file] : "script[lindex $exts 0]"}]
-    set mode ""
-    set h [hook prepare]
-    if {$h ne ""} {
-        set p [$h $code $selOnly $file $name]
-        if {[dict exists $p name]} {set name [dict get $p name]}
-        if {[dict exists $p code]} {set code [dict get $p code]}
-        if {[dict exists $p mode]} {set mode [dict get $p mode]}
-    }
-    return [dict create name $name code $code mode $mode]
-}
-
-# errPatterns (%F = arquivo) -> lista regex nº-de-grupos para o linkify.
-proc qc::errPats {patterns name} {
-    set pats {}
-    set fre "(?:\[^\\s:(\"'\]*\[/\\\\\])?[reQuote $name]"
-    foreach p $patterns {
-        set p [string map [list %F $fre] $p]
-        if {![catch {regexp -about $p} ab]} {lappend pats $p [lindex $ab 0]}
-    }
-    return $pats
-}
-
-proc qc::run {selOnly} {
-    variable ed
-    variable R
-    variable cfg
-    variable file
-    variable lang
-    # linguagens sem execução própria (ex.: Markdown: pré-visualizar)
-    set h [hook run]
-    if {$h ne ""} {
-        $h $selOnly
-        return
-    }
-    if {[info exists R(fd)]} {
-        set ::qc::status "Já existe uma execução em andamento (Ctrl+Break para interromper)"
-        return
-    }
-    if {$cfg(saverun) && ![saveAll 0]} {return}
-    set lineoff 0
-    if {$selOnly} {
-        if {![llength [$ed tag ranges sel]]} {
-            set ::qc::status "Nenhum texto selecionado"
-            return
-        }
-        set code [$ed get sel.first sel.last]
-        set lineoff [expr {[lindex [split [$ed index sel.first] .] 0] - 1}]
-    } else {
-        set code [$ed get 1.0 end-1c]
 # --- arquivos alterados fora do editor ---------------------------------------
 # Cada aba guarda em TB($w,sig) a data e o tamanho do arquivo quando foi
 # aberto/salvo. A cada segundo (só com o qconsole em foco e sem diálogo
@@ -6883,6 +6883,183 @@ proc qc::diskSaveOk {w path} {
     return [expr {$r eq "yes"}]
 }
 
+proc qc::addRecent {path} {
+    variable cfg
+    set l [lsearch -all -inline -not -exact $cfg(recent) $path]
+    set cfg(recent) [lrange [linsert $l 0 $path] 0 9]
+    updateRecentMenu
+}
+
+proc qc::addRecentDir {path} {
+    variable cfg
+    set l [lsearch -all -inline -not -exact $cfg(recentdirs) $path]
+    set cfg(recentdirs) [lrange [linsert $l 0 $path] 0 9]
+    updateRecentMenu
+}
+
+proc qc::updateRecentMenu {} {
+    variable cfg
+    foreach {m key cmd} {.mb.file.recent recent qc::openFile
+                         .mb.file.recentdirs recentdirs qc::openFolder} {
+        if {![winfo exists $m]} {continue}
+        $m delete 0 end
+        foreach p $cfg($key) {
+            $m add command -label $p -command [list $cmd $p]
+        }
+        if {![llength $cfg($key)]} {
+            $m add command -label "(vazio)" -state disabled
+        } else {
+            $m add separator
+            $m add command -label "Limpar lista" \
+                -command [list apply {k {set ::qc::cfg($k) {}; qc::updateRecentMenu}} $key]
+        }
+    }
+}
+
+proc qc::quit {} {
+    variable TB
+    variable cfg
+    foreach w $::qc::tabs {
+        if {[$w edit modified]} {
+            activateTab $w
+            if {![confirmDiscard]} {return}
+        }
+    }
+    # abas reabertas na próxima vez
+    set cfg(tabs) {}
+    foreach w $::qc::tabs {
+        if {$TB($w,file) ne ""} {lappend cfg(tabs) $TB($w,file)}
+    }
+    set cfg(tabcur) $TB($::qc::ed,file)
+    set cfg(floats) {}
+    foreach w $::qc::tabs {
+        if {[winfo parent $w] ne ".pw.ed" && $TB($w,file) ne ""} {
+            lappend cfg(floats) [list $TB($w,file) [wm geometry [winfo toplevel $w]]]
+        }
+    }
+    stop
+    termKill
+    saveCfg
+    catch {file delete -force [tmpDir]}
+    exit
+}
+
+# ---------------------------------------------------------------------------
+# Console e execução
+# ---------------------------------------------------------------------------
+
+proc qc::conAppend {text tag} {
+    variable con
+    $con configure -state normal
+    # linhas enormes (saída sem quebra de linha) deixam o widget text muito
+    # lento: quebra a cada 2000 caracteres
+    set col [lindex [split [$con index end-1c] .] 1]
+    $con insert end [wrapLong $text $col 2000] $tag
+    # limita o tamanho do console
+    set lines [lindex [split [$con index end] .] 0]
+    if {$lines > 50000} {$con delete 1.0 [expr {$lines - 40000}].0}
+    $con configure -state disabled
+    # rolar a cada pedaço é caro quando a saída é contínua: uma vez por ciclo
+    variable conSee
+    if {![info exists conSee]} {
+        set conSee 1
+        after idle {unset ::qc::conSee; $::qc::con see end}
+    }
+}
+
+# Quebra os trechos de text que passariam de max caracteres numa linha
+# (col = caracteres já presentes na linha corrente).
+proc qc::wrapLong {text col max} {
+    if {$col + [string length $text] <= $max} {return $text}
+    set out ""
+    foreach seg [split $text \n] {
+        while {$col + [string length $seg] > $max} {
+            set k [expr {max(0, $max - $col)}]
+            append out [string range $seg 0 $k-1] \n
+            set seg [string range $seg $k end]
+            set col 0
+        }
+        append out $seg \n
+        set col 0
+    }
+    return [string range $out 0 end-1]
+}
+
+proc qc::clearConsole {} {
+    variable con
+    $con configure -state normal
+    $con delete 1.0 end
+    $con configure -state disabled
+}
+
+proc qc::setRunning {on} {
+    # terminal no lugar da saída: volta para a saída ao executar
+    if {$on && $::qc::cfg(terminal) && $::qc::cfg(termpos) eq "replace"} {showTerminal 0}
+    set s [expr {$on ? "disabled" : "!disabled"}]
+    set ns [expr {$on ? "!disabled" : "disabled"}]
+    .tb.run state $s
+    .tb.stop state $ns
+    .mb.script entryconfigure 0 -state [expr {$on ? "disabled" : "normal"}]
+    .mb.script entryconfigure 1 -state [expr {$on ? "disabled" : "normal"}]
+    .mb.script entryconfigure 2 -state [expr {$on ? "normal" : "disabled"}]
+}
+
+# Nome do arquivo temporário (o do arquivo atual ou script.<ext>) e código
+# a executar, com o hook prepare da linguagem. Retorna dict name code mode.
+proc qc::prepareCode {code selOnly} {
+    variable file
+    set exts [lget ext]
+    set ext [string tolower [file extension $file]]
+    set name [expr {$file ne "" && $ext in $exts ? [file tail $file] : "script[lindex $exts 0]"}]
+    set mode ""
+    set h [hook prepare]
+    if {$h ne ""} {
+        set p [$h $code $selOnly $file $name]
+        if {[dict exists $p name]} {set name [dict get $p name]}
+        if {[dict exists $p code]} {set code [dict get $p code]}
+        if {[dict exists $p mode]} {set mode [dict get $p mode]}
+    }
+    return [dict create name $name code $code mode $mode]
+}
+
+# errPatterns (%F = arquivo) -> lista regex nº-de-grupos para o linkify.
+proc qc::errPats {patterns name} {
+    set pats {}
+    set fre "(?:\[^\\s:(\"'\]*\[/\\\\\])?[reQuote $name]"
+    foreach p $patterns {
+        set p [string map [list %F $fre] $p]
+        if {![catch {regexp -about $p} ab]} {lappend pats $p [lindex $ab 0]}
+    }
+    return $pats
+}
+
+proc qc::run {selOnly} {
+    variable ed
+    variable R
+    variable cfg
+    variable file
+    variable lang
+    # linguagens sem execução própria (ex.: Markdown: pré-visualizar)
+    set h [hook run]
+    if {$h ne ""} {
+        $h $selOnly
+        return
+    }
+    if {[info exists R(fd)]} {
+        set ::qc::status "Já existe uma execução em andamento (Ctrl+Break para interromper)"
+        return
+    }
+    if {$cfg(saverun) && ![saveAll 0]} {return}
+    set lineoff 0
+    if {$selOnly} {
+        if {![llength [$ed tag ranges sel]]} {
+            set ::qc::status "Nenhum texto selecionado"
+            return
+        }
+        set code [$ed get sel.first sel.last]
+        set lineoff [expr {[lindex [split [$ed index sel.first] .] 0] - 1}]
+    } else {
+        set code [$ed get 1.0 end-1c]
     }
     if {$cfg(autoclear)} {clearConsole}
     set rn [currentRunner]
@@ -11608,6 +11785,8 @@ proc qc::main {argv} {
         set ::qc::status ""
     }
     applyTerminal
+    set ::qc::watchBusy 0
+    after 1000 qc::watchFiles
     foreach e $::qc::loadErrors {conAppend "Erro ao carregar linguagem: $e\n" stderr}
     focus $::qc::ed
     updateCursor
@@ -11624,5 +11803,3 @@ proc qc::langForFileAny {path} {
 if {![info exists ::qc_nomain]} {
     qc::main $argv
 }
-    set ::qc::watchBusy 0
-    after 1000 qc::watchFiles
