@@ -6659,6 +6659,7 @@ proc qc::quit {} {
     foreach w $::qc::tabs {
         if {[winfo parent $w] ne ".pw.ed" && $TB($w,file) ne ""} {
             lappend cfg(floats) [list $TB($w,file) [wm geometry [winfo toplevel $w]]]
+    set ::qc::TB($::qc::ed,sig) [fileSig $file]
         }
     }
     stop
@@ -6716,6 +6717,7 @@ proc qc::clearConsole {} {
     $con configure -state disabled
 }
 
+    if {![diskSaveOk $w $path]} {return 0}
 proc qc::setRunning {on} {
     # terminal no lugar da saída: volta para a saída ao executar
     if {$on && $::qc::cfg(terminal) && $::qc::cfg(termpos) eq "replace"} {showTerminal 0}
@@ -6725,6 +6727,7 @@ proc qc::setRunning {on} {
     .tb.stop state $ns
     .mb.script entryconfigure 0 -state [expr {$on ? "disabled" : "normal"}]
     .mb.script entryconfigure 1 -state [expr {$on ? "disabled" : "normal"}]
+    set TB($w,sig) [fileSig $path]
     .mb.script entryconfigure 2 -state [expr {$on ? "normal" : "disabled"}]
 }
 
@@ -6784,6 +6787,102 @@ proc qc::run {selOnly} {
         set lineoff [expr {[lindex [split [$ed index sel.first] .] 0] - 1}]
     } else {
         set code [$ed get 1.0 end-1c]
+# --- arquivos alterados fora do editor ---------------------------------------
+# Cada aba guarda em TB($w,sig) a data e o tamanho do arquivo quando foi
+# aberto/salvo. A cada segundo (só com o qconsole em foco e sem diálogo
+# aberto) as abas são conferidas; se o arquivo mudou, pergunta se recarrega.
+
+proc qc::fileSig {path} {
+    if {$path eq "" || [catch {file stat $path st}]} {return ""}
+    return [list $st(mtime) $st(size)]
+}
+
+# Texto do arquivo como fica no editor (sem a quebra de linha final).
+proc qc::diskText {path} {
+    set data [readFile $path]
+    if {[string index $data end] eq "\n"} {set data [string range $data 0 end-1]}
+    return $data
+}
+
+proc qc::watchFiles {} {
+    variable TB
+    variable watchBusy
+    after 1000 qc::watchFiles
+    if {$watchBusy || [focus] eq "" || [grab current] ne ""} {return}
+    set watchBusy 1
+    try {
+        foreach w $::qc::tabs {
+            if {[winfo exists $w]} {watchCheck $w}
+        }
+    } finally {
+        set watchBusy 0
+    }
+}
+
+proc qc::watchCheck {w} {
+    variable TB
+    set f $TB($w,file)
+    if {$f eq ""} {return}
+    set old [expr {[info exists TB($w,sig)] ? $TB($w,sig) : ""}]
+    set sig [fileSig $f]
+    # "gone": o arquivo sumiu (removido ou renomeado por outro programa)
+    if {$sig eq ""} {set sig gone}
+    if {$sig eq $old} {return}
+    set TB($w,sig) $sig
+    if {$old eq ""} {return}
+    if {$sig eq "gone"} {
+        set ::qc::status "Arquivo removido do disco: $f"
+        $w edit modified 1
+        onModified $w
+        return
+    }
+    # mudou só a data (touch, ou salvo igual por outro programa)
+    if {[catch {diskText $f} data] || $data eq [$w get 1.0 end-1c]} {return}
+    activateTab $w
+    set mod [$w edit modified]
+    set detail [expr {$mod
+        ? "Esta aba tem alterações não salvas, que serão perdidas se recarregar."
+        : "Esta aba não tem alterações não salvas."}]
+    set r [tk_messageBox -parent [winfo toplevel $w] -icon question -type yesno \
+        -default [expr {$mod ? "no" : "yes"}] -title qconsole \
+        -message "\"[file tail $f]\" foi alterado fora do editor. Recarregar?" \
+        -detail "$f\n\n$detail"]
+    if {$r eq "yes" && [winfo exists $w]} {
+        reloadTab $w $data
+    } elseif {[winfo exists $w]} {
+        # mantém a versão do editor: ela passa a ser diferente do disco
+        $w edit modified 1
+        onModified $w
+    }
+}
+
+# Troca o conteúdo da aba pelo do disco, mantendo cursor e rolagem.
+proc qc::reloadTab {w data} {
+    activateTab $w
+    set ins [$w index insert]
+    set top [$w index @0,0]
+    setContent $data
+    $w mark set insert $ins
+    $w yview $top
+    updateCursor
+    set ::qc::status "Recarregado: $::qc::TB($w,file)"
+}
+
+# Antes de gravar por cima: se o arquivo mudou no disco desde que foi
+# aberto/salvo, confirma.
+proc qc::diskSaveOk {w path} {
+    variable TB
+    if {$path ne $TB($w,file) || ![info exists TB($w,sig)]} {return 1}
+    set sig [fileSig $path]
+    if {$sig eq "" || $sig eq $TB($w,sig)} {return 1}
+    if {![catch {diskText $path} data] && $data eq [$w get 1.0 end-1c]} {return 1}
+    set r [tk_messageBox -parent [winfo toplevel $w] -icon warning -type yesno \
+        -default no -title qconsole \
+        -message "\"[file tail $path]\" foi alterado fora do editor. Sobrescrever?" \
+        -detail "$path\n\nSalvar agora substitui a versão do disco pela do editor."]
+    return [expr {$r eq "yes"}]
+}
+
     }
     if {$cfg(autoclear)} {clearConsole}
     set rn [currentRunner]
@@ -11525,3 +11624,5 @@ proc qc::langForFileAny {path} {
 if {![info exists ::qc_nomain]} {
     qc::main $argv
 }
+    set ::qc::watchBusy 0
+    after 1000 qc::watchFiles
