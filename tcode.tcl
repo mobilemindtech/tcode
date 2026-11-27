@@ -998,6 +998,9 @@ proc qc::edProxy {w args} {
     if {[catch {::qc::raw$w {*}$args} r o]} {
         return -code error -errorcode [dict get $o -errorcode] $r
     }
+    if {$op in {insert delete replace} || ($op eq "edit" && [lindex $args 1] in {undo redo})} {
+        unset -nocomplain ::qc::TB($w,igact)
+    }
     if {$op in {insert delete replace}} {
         if {$l1 eq "" || [catch {$raw count -lines 1.0 end} n1]} {
             hlDirty $w 1 0
@@ -2595,9 +2598,10 @@ proc qc::drawGutter {{ed ""}} {
     set nl 0 ;# "⋯" dos blocos recolhidos
     set i [$ed index "@0,0 linestart"]
     if {[$ed dlineinfo $i] eq ""} {set i [$ed index "$i +1 line"]}
+    set hasFolds [llength [foldTags $ed]]
     while {[$ed compare $i < end]} {
         # linhas de um bloco recolhido: pula para depois dele
-        set e [foldEndAt $ed $i]
+        set e [expr {$hasFolds ? [foldEndAt $ed $i] : ""}]
         if {$e ne "" && [$ed compare $e > $i]} {
             set i $e
             continue
@@ -2638,8 +2642,37 @@ proc qc::drawGutter {{ed ""}} {
         incr nl
     }
     drawRulers $ed
-    drawIndentGuides $ed
+    lazyIndentGuides $ed
     if {$main} {drawPretty}
+}
+
+# As guias de indentação são frames sobre o texto: mover um deles faz o
+# widget redesenhar as linhas por baixo, o que triplica o custo de cada
+# passo da rolagem. Enquanto a primeira linha visível muda (rolagem), elas
+# ficam escondidas e voltam quando a vista para.
+proc qc::lazyIndentGuides {ed} {
+    variable TB
+    set top [$ed index @0,0]
+    set moved [expr {[info exists TB($ed,igtop)] && $TB($ed,igtop) ne $top}]
+    set TB($ed,igtop) $top
+    if {[info exists TB($ed,igafter)]} {after cancel $TB($ed,igafter)}
+    if {$moved && $::qc::cfg(indentguides)} {
+        set n 0
+        while {[winfo exists $ed.ig$n]} {
+            place forget $ed.ig$n
+            incr n
+        }
+        # tclint-disable-next-line command-args
+        set TB($ed,igafter) [after 120 [list qc::lazyIndentGuidesDone $ed]]
+        return
+    }
+    unset -nocomplain TB($ed,igafter)
+    drawIndentGuides $ed
+}
+
+proc qc::lazyIndentGuidesDone {ed} {
+    unset -nocomplain ::qc::TB($ed,igafter)
+    if {[winfo exists $ed] && [edVisible $ed]} {drawIndentGuides $ed}
 }
 
 # --- guias de coluna (cfg(rulers)) -----------------------------------------
@@ -2664,9 +2697,10 @@ proc qc::drawRulers {ed} {
                     -background $::qc::C(ruler)
                 bindtags $l [list $l QcRuler QcPretty]
             }
+            set mapped [winfo manager $l]
             place $l -x $x -y 0 -width 1 -relheight 1
             # abaixo dos símbolos, cursores extras e marcadores de bloco
-            lower $l
+            if {$mapped eq ""} {lower $l}
             incr i
         }
     }
@@ -2708,8 +2742,12 @@ proc qc::drawIndentGuides {ed} {
         set x0 ""
         set bot [$ed index "@0,[winfo height $ed]"]
         set i [$ed index "@0,0 linestart"]
+        # sem blocos recolhidos nem quebra de linha, cada linha é uma
+        # dlineinfo só e não precisa de foldEndAt
+        set hasFolds [llength [foldTags $ed]]
+        set wrap [expr {[$ed cget -wrap] ne "none"}]
         while {[$ed compare $i <= $bot]} {
-            set e [foldEndAt $ed $i]
+            set e [expr {$hasFolds ? [foldEndAt $ed $i] : ""}]
             if {$e ne "" && [$ed compare $e > $i]} {
                 set i [$ed index "$e linestart"]
                 if {[$ed compare $e != "$e linestart"]} {set i [$ed index "$i +1 line"]}
@@ -2720,7 +2758,7 @@ proc qc::drawIndentGuides {ed} {
             if {$d ne ""} {
                 if {$x0 eq ""} {set x0 [lindex $d 0]}
                 set y [lindex $d 1]
-                set dl [$ed dlineinfo "$i lineend"]
+                set dl [expr {$wrap ? [$ed dlineinfo "$i lineend"] : $d}]
                 if {$dl eq ""} {set dl $d}
                 set yb [expr {[lindex $dl 1] + [lindex $dl 3]}]
                 set lastN [lindex [split $i .] 0]
@@ -2808,6 +2846,18 @@ proc qc::drawIndentGuides {ed} {
 # indentada) é a guia do corpo dele; nas outras, a do nível mais interno
 # que passa pela linha. Coluna -1: nenhuma.
 proc qc::activeIndentGuide {ed tw last} {
+    # só depende do cursor e do texto: guardado até um dos dois mudar (ao
+    # rolar, as guias são redesenhadas a cada passo; ver qc::edProxy)
+    set key [list [$ed index insert] $tw $last]
+    if {[info exists ::qc::TB($ed,igact)] && [lindex $::qc::TB($ed,igact) 0] eq $key} {
+        return [lindex $::qc::TB($ed,igact) 1]
+    }
+    set r [activeIndentGuideCalc $ed $tw $last]
+    set ::qc::TB($ed,igact) [list $key $r]
+    return $r
+}
+
+proc qc::activeIndentGuideCalc {ed tw last} {
     lassign [activeIndentCol $ed $tw $last] ac head cl
     if {$ac < 0} {return {-1 0 0}}
     # linhas não vazias com indentação <= ac delimitam o bloco
@@ -2863,9 +2913,13 @@ proc qc::indentGuide {ed n x y0 y1 {act 0}} {
         frame $l -width 1 -bd 0 -highlightthickness 0 -cursor xterm
         bindtags $l [list $l QcRuler QcPretty]
     }
-    $l configure -background $::qc::C([expr {$act ? "indguideact" : "indguide"}])
+    # mexer só no que mudou: reconfigurar e reempilhar janelas a cada passo
+    # da rolagem custa mais que o resto do desenho
+    set bg $::qc::C([expr {$act ? "indguideact" : "indguide"}])
+    if {[$l cget -background] ne $bg} {$l configure -background $bg}
+    set mapped [winfo manager $l]
     place $l -x $x -y $y0 -width 1 -height [expr {max(1, $y1 - $y0)}]
-    lower $l
+    if {$mapped eq ""} {lower $l}
 }
 
 # clique sobre a guia: cursor no ponto do editor logo abaixo
